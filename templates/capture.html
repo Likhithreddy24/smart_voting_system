@@ -139,7 +139,8 @@
 
             const context = canvas.getContext('2d');
             context.drawImage(video, 0, 0, 640, 480);
-            const dataURL = canvas.toDataURL('image/jpeg', 0.8);
+            // Quality 0.5 for speed
+            const dataURL = canvas.toDataURL('image/jpeg', 0.5);
 
             try {
                 const response = await fetch('{{ url_for("capture_images") }}', {
@@ -165,23 +166,16 @@
                 } else {
                     let reason = result.reason || "Unknown";
                     let msg = "Ignored: " + reason;
-
-                    // User-friendly messages
-                    if (reason === "no_face") msg = "No face detected. Look at camera.";
-                    if (reason === "too_small") msg = "Face too small. Move closer.";
-                    if (reason === "blurry") msg = "Image blurry. Hold still.";
-                    if (reason === "not_centered") msg = "Center your face.";
-
                     statusMsg.innerText = msg;
-                    statusMsg.style.color = "#ffc107"; // Warning color
+                    statusMsg.style.color = "#ffc107";
                 }
             } catch (e) {
                 console.error("Upload failed", e);
                 statusMsg.innerText = "Network error, retrying...";
             }
 
-            // Capture next frame with a slight delay
-            setTimeout(captureLoop, 200); // Increased delay slightly to allow user to read message
+            // 10ms delay for max speed
+            setTimeout(captureLoop, 10);
         }
 
         function finishCapture() {
