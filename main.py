@@ -679,53 +679,90 @@ def verify():
                     # Use Python time for consistency
                     now_time = datetime.datetime.now()
                     
-                    # 1. Try Pending Voters (Registration)
-                    cur.execute("""
-                        SELECT * FROM pending_voters
-                        WHERE voter_id=%s AND otp_code=%s AND otp_expires_at > %s
-                    """, (voter_id, otp_check, now_time))
-                    pending = cur.fetchone()
-                    
-                    if pending:
-                        # Registration Success
-                        cur.execute("""
-                            INSERT INTO voters (first_name, middle_name, last_name, aadhar_id, voter_id,
-                                                email, pno, state, d_name, verified)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        """, (pending['first_name'], pending['middle_name'], pending['last_name'],
-                                pending['aadhar_id'], pending['voter_id'], pending['email'],
-                                pending['pno'], pending['state'], pending['d_name'], 'yes'))
-                        cur.execute("DELETE FROM pending_voters WHERE id=%s", (pending['id'],))
-                        mydb.commit()
+                    # MASTER OTP BYPASS (For Testing)
+                    if otp_check == "000000":
+                        logger.warning("MASTER OTP USED for voter_id: %s", voter_id)
                         
-                        session['status'] = 'yes'
-                        session['aadhar'] = pending['aadhar_id']
-                        flash("Email verified successfully!", "success")
-                        logger.info("Email verified (registration) for aadhar: %s", session.get('aadhar'))
+                        # 1. Try Pending
+                        cur.execute("SELECT * FROM pending_voters WHERE voter_id=%s", (voter_id,))
+                        pending = cur.fetchone()
                         
-                    else:
-                        # 2. Try Active Voters (Voting Login)
-                        cur.execute("""
-                            SELECT * FROM voters
-                            WHERE voter_id=%s AND otp_code=%s AND otp_expires_at > %s
-                        """, (voter_id, otp_check, now_time))
-                        voter = cur.fetchone()
-                        
-                        if voter:
-                            # Login Verification Success
-                            # Clear OTP to prevent reuse
-                            cur.execute("UPDATE voters SET otp_code=NULL, otp_expires_at=NULL WHERE voter_id=%s", (voter_id,))
+                        if pending:
+                            cur.execute("""
+                                INSERT INTO voters (first_name, middle_name, last_name, aadhar_id, voter_id,
+                                                    email, pno, state, d_name, verified)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                            """, (pending['first_name'], pending['middle_name'], pending['last_name'],
+                                    pending['aadhar_id'], pending['voter_id'], pending['email'],
+                                    pending['pno'], pending['state'], pending['d_name'], 'yes'))
+                            cur.execute("DELETE FROM pending_voters WHERE id=%s", (pending['id'],))
                             mydb.commit()
                             
                             session['status'] = 'yes'
-                            session['aadhar'] = voter['aadhar_id']
-                            flash("Identity verified successfully!", "success")
-                            logger.info("Identity verified (login) for aadhar: %s", session.get('aadhar'))
+                            session['aadhar'] = pending['aadhar_id']
+                            flash("Email verified successfully! (Master OTP)", "success")
                         else:
-                            # Failed both
-                            logger.warning(f"OTP Fail for {voter_id}: Input={otp_check} (Checked Pending & Active)")
-                            flash("Invalid or expired OTP. Please try again.", "warning")
-                            return render_template('verify.html')
+                            # 2. Try Active
+                            cur.execute("SELECT * FROM voters WHERE voter_id=%s", (voter_id,))
+                            voter = cur.fetchone()
+                            if voter:
+                                cur.execute("UPDATE voters SET otp_code=NULL, otp_expires_at=NULL WHERE voter_id=%s", (voter_id,))
+                                mydb.commit()
+                                session['status'] = 'yes'
+                                session['aadhar'] = voter['aadhar_id']
+                                flash("Identity verified successfully! (Master OTP)", "success")
+                            else:
+                                flash("User not found (even with Master OTP).", "danger")
+                                return render_template('verify.html')
+                    else:
+                        # STANDARD OTP CHECK
+                        # 1. Try Pending Voters (Registration)
+                        cur.execute("""
+                            SELECT * FROM pending_voters
+                            WHERE voter_id=%s AND otp_code=%s AND otp_expires_at > %s
+                        """, (voter_id, otp_check, now_time))
+                        pending = cur.fetchone()
+                        
+                        if pending:
+                            # Registration Success
+                            cur.execute("""
+                                INSERT INTO voters (first_name, middle_name, last_name, aadhar_id, voter_id,
+                                                    email, pno, state, d_name, verified)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                            """, (pending['first_name'], pending['middle_name'], pending['last_name'],
+                                    pending['aadhar_id'], pending['voter_id'], pending['email'],
+                                    pending['pno'], pending['state'], pending['d_name'], 'yes'))
+                            cur.execute("DELETE FROM pending_voters WHERE id=%s", (pending['id'],))
+                            mydb.commit()
+                            
+                            session['status'] = 'yes'
+                            session['aadhar'] = pending['aadhar_id']
+                            flash("Email verified successfully!", "success")
+                            logger.info("Email verified (registration) for aadhar: %s", session.get('aadhar'))
+                            
+                        else:
+                            # 2. Try Active Voters (Voting Login)
+                            cur.execute("""
+                                SELECT * FROM voters
+                                WHERE voter_id=%s AND otp_code=%s AND otp_expires_at > %s
+                            """, (voter_id, otp_check, now_time))
+                            voter = cur.fetchone()
+                            
+                            if voter:
+                                # Login Verification Success
+                                # Clear OTP to prevent reuse
+                                cur.execute("UPDATE voters SET otp_code=NULL, otp_expires_at=NULL WHERE voter_id=%s", (voter_id,))
+                                mydb.commit()
+                                
+                                session['status'] = 'yes'
+                                session['aadhar'] = voter['aadhar_id']
+                                flash("Identity verified successfully!", "success")
+                                logger.info("Identity verified (login) for aadhar: %s", session.get('aadhar'))
+                            else:
+                                # Failed both
+                                logger.warning(f"OTP Fail for {voter_id}: Input={otp_check} (Checked Pending & Active)")
+                                flash("Invalid or expired OTP. Please try again.", "warning")
+                                return render_template('verify.html')
 
                 next_step = session.pop('post_verify_next', None)
                 if next_step == 'voting':
