@@ -46,9 +46,11 @@
                 <div class="row justify-content-center mt-4">
                     <div class="col-md-8">
                         <div id="camera-container" class="mb-4 position-relative" style="display: none;">
-                            <video id="video" width="640" height="480" autoplay playsinline style="width: 100%; max-width: 600px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.2);"></video>
+                            <video id="video" width="640" height="480" autoplay playsinline
+                                style="width: 100%; max-width: 600px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.2);"></video>
                             <canvas id="canvas" width="640" height="480" style="display: none;"></canvas>
-                            <div id="overlay" style="position: absolute; top: 10px; left: 10px; color: white; background: rgba(0,0,0,0.5); padding: 5px 10px; border-radius: 5px;">
+                            <div id="overlay"
+                                style="position: absolute; top: 10px; left: 10px; color: white; background: rgba(0,0,0,0.5); padding: 5px 10px; border-radius: 5px;">
                                 Ready
                             </div>
                         </div>
@@ -71,11 +73,12 @@
                                 <i class="fas fa-play-circle mr-2"></i> Start Capture
                             </button>
                         </div>
-                        
+
                         <div id="progress-container" class="mt-4" style="display: none;">
                             <p class="text-white mb-2">Capturing images... <span id="count">0</span>/100</p>
                             <div class="progress" style="height: 20px;">
-                                <div id="progress-bar" class="progress-bar bg-success" role="progressbar" style="width: 0%"></div>
+                                <div id="progress-bar" class="progress-bar bg-success" role="progressbar"
+                                    style="width: 0%"></div>
                             </div>
                             <p id="status-msg" class="text-white-50 mt-2 small"></p>
                         </div>
@@ -87,7 +90,7 @@
 
     <script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
     <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/js/bootstrap.bundle.min.js"></script>
-    
+
     <script>
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
@@ -160,7 +163,17 @@
                     finishCapture();
                     return;
                 } else {
-                    statusMsg.innerText = "Ignored: " + (result.reason || "Unknown");
+                    let reason = result.reason || "Unknown";
+                    let msg = "Ignored: " + reason;
+
+                    // User-friendly messages
+                    if (reason === "no_face") msg = "No face detected. Look at camera.";
+                    if (reason === "too_small") msg = "Face too small. Move closer.";
+                    if (reason === "blurry") msg = "Image blurry. Hold still.";
+                    if (reason === "not_centered") msg = "Center your face.";
+
+                    statusMsg.innerText = msg;
+                    statusMsg.style.color = "#ffc107"; // Warning color
                 }
             } catch (e) {
                 console.error("Upload failed", e);
@@ -168,7 +181,7 @@
             }
 
             // Capture next frame with a slight delay
-            setTimeout(captureLoop, 100); 
+            setTimeout(captureLoop, 200); // Increased delay slightly to allow user to read message
         }
 
         function finishCapture() {
