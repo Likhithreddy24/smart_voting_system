@@ -805,6 +805,7 @@ def capture_images():
         flash("Please verify your email before capturing images.", "warning")
         return redirect(url_for('verify'))
 
+    # Helper function for face validation
     def face_centered_and_large(frame_w: int, frame_h: int, x: int, y: int, w: int, h: int) -> bool:
         min_dim = min(frame_w, frame_h)
         size_ok = (w >= config.CAPTURE_MIN_FACE_RATIO * min_dim) and (h >= config.CAPTURE_MIN_FACE_RATIO * min_dim)
@@ -817,242 +818,83 @@ def capture_images():
         center_ok = (abs(cx_face - cx_img) <= tol_x) and (abs(cy_face - cy_img) <= tol_y)
         return size_ok and center_ok
 
-    if request.method == 'POST':
+    # Handle AJAX POST for image upload
+    if request.method == 'POST' and request.is_json:
+        data = request.get_json()
+        image_data = data.get('image')
+        
+        if not image_data:
+            return {"status": "error", "reason": "No image data"}
+
         aadhar = session.get('aadhar')
         if not aadhar:
-            flash("Session expired. Please register again.", "warning")
-            return redirect(url_for('registration'))
+            return {"status": "error", "reason": "Session expired"}
 
-        cam = try_open_camera()
-        if not cam:
-            flash("Unable to access camera. Check device index and permissions.", "warning")
-            return redirect(url_for('home'))
-
-        sampleNum = 0
-        path_to_store = os.path.join(os.getcwd(), "all_images", aadhar)
+        # Decode Base64 Image
         try:
-            shutil.rmtree(path_to_store)
-        except Exception:
-            pass
+            import base64
+            header, encoded = image_data.split(",", 1)
+            img_bytes = base64.b64decode(encoded)
+            np_arr = np.frombuffer(img_bytes, np.uint8)
+            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if img is None:
+                return {"status": "error", "reason": "Invalid image"}
+        except Exception as e:
+            return {"status": "error", "reason": f"Decode failed: {str(e)}"}
+
+        # Prepare storage path
+        path_to_store = os.path.join(os.getcwd(), "all_images", aadhar)
         os.makedirs(path_to_store, exist_ok=True)
+        
+        # Check current count
+        current_count = len([name for name in os.listdir(path_to_store) if name.endswith('.jpg')])
+        if current_count >= 100:
+            return {"status": "finished"}
 
-        encoder = load_encoder()
-        recognizer = load_recognizer()
-
-        expected_label_id: Optional[int] = None
-        expected_known_to_model = False
-        classes: List[str] = []
-        if encoder is not None:
-            try:
-                classes = list(getattr(encoder, "classes_", []))
-                if aadhar in classes:
-                    expected_known_to_model = True
-                    expected_label_id = int(np.where(np.array(classes) == aadhar)[0][0])
-            except Exception as e:
-                if app.debug:
-                    logger.warning("Error mapping expected aadhar to label id: %s", e)
-
-        start_time = time.time()
-        timeout = 25  # slightly longer
-        stable_counter = 0
-        last_match_ok = False
-
-        reasons = {
-            "no_face": 0,
-            "too_small": 0,
-            "blurry": 0,
-            "not_centered_or_small_ratio": 0,
-            "identity_mismatch": 0,
-            "predict_error": 0
-        }
-
-        logger.info("Capture started for aadhar=%s, expected_known_to_model=%s, thresholds: min_face=%d, blur=%.1f, ratio=%.2f, center_tol=%.2f, stable=%d, lbph_cap_thr=%.1f",
-                    aadhar, expected_known_to_model, config.MIN_FACE_SIZE, config.BLUR_THRESHOLD, config.CAPTURE_MIN_FACE_RATIO,
-                    config.CAPTURE_CENTER_TOLERANCE, config.CAPTURE_STABLE_CONSEC_FRAMES, config.CAPTURE_LBPH_CONF_THRESHOLD)
-
-        duplicate_face_counter = 0  # Counter for consecutive duplicate detections
-
-        while True:
-            ret, img = cam.read()
-            if not ret:
-                continue
-            try:
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            except Exception:
-                continue
-
+        # Process Image (Face Detection)
+        try:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             frame_h, frame_w = gray.shape[:2]
             faces = cascade.detectMultiScale(gray, 1.3, 5)
-            current_ok = False
 
             if len(faces) == 0:
-                reasons["no_face"] += 1
-                duplicate_face_counter = 0 # Reset if no face
+                return {"status": "ignored", "reason": "no_face"}
 
+            # Find the best face (largest)
+            best_face = None
+            max_area = 0
+            
             for (x, y, w, h) in faces:
+                if w * h > max_area:
+                    max_area = w * h
+                    best_face = (x, y, w, h)
+
+            if best_face:
+                x, y, w, h = best_face
+                
+                # Validation Checks
                 if w < config.MIN_FACE_SIZE or h < config.MIN_FACE_SIZE:
-                    reasons["too_small"] += 1
-                    if app.debug:
-                        logger.debug("Reject: too_small w=%d h=%d (min=%d)", w, h, config.MIN_FACE_SIZE)
-                    continue
+                    return {"status": "ignored", "reason": "too_small"}
+                
                 roi = gray[y:y + h, x:x + w]
                 if is_blurry(roi):
-                    reasons["blurry"] += 1
-                    if app.debug:
-                        logger.debug("Reject: blurry varLap=%.2f thr=%.2f", cv2.Laplacian(roi, cv2.CV_64F).var(), config.BLUR_THRESHOLD)
-                    continue
-                if not face_centered_and_large(frame_w, frame_h, x, y, w, h):
-                    reasons["not_centered_or_small_ratio"] += 1
-                    if app.debug:
-                        min_dim = min(frame_w, frame_h)
-                        ratio_w = w / float(min_dim)
-                        ratio_h = h / float(min_dim)
-                        logger.debug("Reject: not centered/ratio w=%.2f h=%.2f center_tol=%.2f", ratio_w, ratio_h, config.CAPTURE_CENTER_TOLERANCE)
-                    continue
-
-                # Check for duplicate face (face exists but belongs to someone else)
-                duplicate_detected_this_frame = False
-                if recognizer is not None and encoder is not None:
-                    try:
-                        roi_resized = cv2.resize(roi, (config.ROI_SIZE, config.ROI_SIZE))
-                        pred_id, conf = recognizer.predict(roi_resized)
-                        
-                        # If confidence is high (low distance)
-                        if conf < config.CAPTURE_LBPH_CONF_THRESHOLD:
-                            predicted_aadhar = encoder.classes_[pred_id]
-                            
-                            # If the predicted person is NOT the current user
-                            if predicted_aadhar != aadhar:
-                                # Check if this predicted aadhar actually exists in the DB
-                                is_active_voter = False
-                                try:
-                                    with mydb.cursor() as cur:
-                                        cur.execute("SELECT 1 FROM voters WHERE aadhar_id = %s", (predicted_aadhar,))
-                                        if cur.fetchone():
-                                            is_active_voter = True
-                                except Exception:
-                                    pass
-
-                                if is_active_voter:
-                                    duplicate_detected_this_frame = True
-                                    duplicate_face_counter += 1
-                                    logger.warning("Duplicate face detected frame %d! Predicted: %s", duplicate_face_counter, predicted_aadhar)
-                                    
-                                    if duplicate_face_counter >= 10: # Require 10 consecutive frames
-                                        logger.warning("Duplicate face CONFIRMED! Predicted: %s, Current: %s, Conf: %.2f", predicted_aadhar, aadhar, conf)
-                                        cam.release()
-                                        
-                                        # Rollback: Delete the current voter registration
-                                        try:
-                                            with mydb.cursor() as cur:
-                                                cur.execute("DELETE FROM voters WHERE aadhar_id = %s", (aadhar,))
-                                            mydb.commit()
-                                            logger.info("Rolled back registration for duplicate face aadhar: %s", aadhar)
-                                        except Exception as e:
-                                            logger.error("Failed to rollback registration: %s", e)
-                                        
-                                        # Clear session
-                                        session.pop('aadhar', None)
-                                        session.pop('status', None)
-                                        session.pop('email', None)
-                                        
-                                        flash(f"Registration Cancelled: Face already registered with Aadhar ID: {predicted_aadhar}", "danger")
-                                        return redirect(url_for('home'))
-                                else:
-                                    # Ghost face (in model but not in DB) - Ignore and continue
-                                    if app.debug:
-                                        logger.debug("Ignored ghost face match: %s (not in DB)", predicted_aadhar)
-                    except cv2.error:
-                        pass
+                    return {"status": "ignored", "reason": "blurry"}
                 
-                if not duplicate_detected_this_frame:
-                    duplicate_face_counter = 0 # Reset if not detected in this frame
+                if not face_centered_and_large(frame_w, frame_h, x, y, w, h):
+                    return {"status": "ignored", "reason": "not_centered"}
 
-                # Identity enforcement only if the expected aadhar is already in the model
-                if recognizer is not None and encoder is not None and expected_known_to_model and expected_label_id is not None:
-                    try:
-                        roi_resized = cv2.resize(roi, (config.ROI_SIZE, config.ROI_SIZE))
-                        pred_id, conf = recognizer.predict(roi_resized)
-                        if app.debug:
-                            logger.debug("Predict (known): pred=%s conf=%.2f exp=%s thr=%.1f", str(pred_id), conf, str(expected_label_id), config.CAPTURE_LBPH_CONF_THRESHOLD)
-                        if pred_id == expected_label_id and conf < config.CAPTURE_LBPH_CONF_THRESHOLD:
-                            current_ok = True
-                        else:
-                            reasons["identity_mismatch"] += 1
-                            current_ok = False
-                    except cv2.error as e:
-                        reasons["predict_error"] += 1
-                        if app.debug:
-                            logger.warning("capture predict error: %s", e)
-                        current_ok = False
-                else:
-                    # Do not reject based on identity when expected aadhar is not yet in the model.
-                    current_ok = True
+                # Save Image
+                sampleNum = current_count + 1
+                cv2.imwrite(os.path.join(path_to_store, f"{sampleNum}.jpg"), roi)
+                return {"status": "success", "count": sampleNum}
+            
+            return {"status": "ignored", "reason": "no_valid_face"}
 
-                if current_ok:
-                    break
+        except Exception as e:
+            logger.error("Error processing frame: %s", e)
+            return {"status": "error", "reason": "Processing error"}
 
-            # Stability logic
-            if current_ok:
-                if last_match_ok:
-                    stable_counter += 1
-                else:
-                    stable_counter = 1
-                last_match_ok = True
-                if app.debug:
-                    logger.debug("Stable OK frames: %d / required %d", stable_counter, config.CAPTURE_STABLE_CONSEC_FRAMES)
-            else:
-                if last_match_ok and app.debug:
-                    logger.debug("Stability reset")
-                stable_counter = 0
-                last_match_ok = False
-
-            # Save after sufficient stability
-            if stable_counter >= config.CAPTURE_STABLE_CONSEC_FRAMES and current_ok:
-                saved_this_round = 0
-                for (x, y, w, h) in faces:
-                    if w < config.MIN_FACE_SIZE or h < config.MIN_FACE_SIZE:
-                        continue
-                    roi = gray[y:y + h, x:x + w]
-                    if is_blurry(roi):
-                        continue
-                    if not face_centered_and_large(frame_w, frame_h, x, y, w, h):
-                        continue
-                    # Re-check identity only if expected aadhar is known in model
-                    if recognizer is not None and encoder is not None and expected_known_to_model and expected_label_id is not None:
-                        try:
-                            roi_resized = cv2.resize(roi, (config.ROI_SIZE, config.ROI_SIZE))
-                            pred_id, conf = recognizer.predict(roi_resized)
-                            if not (pred_id == expected_label_id and conf < config.CAPTURE_LBPH_CONF_THRESHOLD):
-                                continue
-                        except cv2.error:
-                            continue
-
-                    sampleNum += 1
-                    saved_this_round += 1
-                    cv2.imwrite(os.path.join(path_to_store, f"{sampleNum}.jpg"), roi)
-
-                if app.debug:
-                    logger.info("Saved %d images this round (total=%d).", saved_this_round, sampleNum)
-                stable_counter = max(0, config.CAPTURE_STABLE_CONSEC_FRAMES // 2)
-
-            if sampleNum >= 200 or (time.time() - start_time) > timeout:
-                break
-
-        cam.release()
-        try:
-            cv2.destroyAllWindows()
-        except Exception:
-            pass
-
-        logger.info("Capture finished for aadhar=%s. Saved=%d. Reasons summary: %s", aadhar, sampleNum, reasons)
-
-        if sampleNum == 0:
-            flash("No valid images captured for the intended voter. Please try again.", "warning")
-            return redirect(url_for('capture_images'))
-
-        flash("Face images captured successfully.", "success")
-        return redirect(url_for('home'))
+    # GET request: Render the capture page
     return render_template('capture.html')
 
 from sklearn.preprocessing import LabelEncoder
