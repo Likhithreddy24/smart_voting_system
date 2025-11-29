@@ -77,8 +77,8 @@ class Config:
 
     # Capture strictness (relaxed)
     CAPTURE_STABLE_CONSEC_FRAMES = int(os.environ.get("CAPTURE_STABLE_CONSEC_FRAMES", "8"))   # was 15
-    CAPTURE_MIN_FACE_RATIO = float(os.environ.get("CAPTURE_MIN_FACE_RATIO", "0.30"))          # was 0.40
-    CAPTURE_CENTER_TOLERANCE = float(os.environ.get("CAPTURE_CENTER_TOLERANCE", "0.25"))      # was 0.15
+    CAPTURE_MIN_FACE_RATIO = float(os.environ.get("CAPTURE_MIN_FACE_RATIO", "0.15"))          # Reduced from 0.30 to 0.15 for easier capture
+    CAPTURE_CENTER_TOLERANCE = float(os.environ.get("CAPTURE_CENTER_TOLERANCE", "0.35"))      # Increased from 0.25 to 0.35
     CAPTURE_LBPH_CONF_THRESHOLD = float(os.environ.get("CAPTURE_LBPH_CONF_THRESHOLD", "30.0"))  # lowered to reduce false positives
 
 config = Config()
