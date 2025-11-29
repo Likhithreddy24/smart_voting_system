@@ -11,6 +11,10 @@ import tempfile
 from typing import Optional, Tuple, Dict, Any, List, Deque
 from collections import deque, defaultdict
 
+import random
+import datetime
+import time
+import logging
 from flask import (
     Flask, render_template, url_for, request, session, flash, redirect,
     send_file, abort
@@ -30,28 +34,24 @@ from PIL import Image
 # -------------------------
 
 class Config:
-    # Flask
-    SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-change-me")
-
-    # Database
-    DB_HOST = os.environ.get("DB_HOST", "127.0.0.1")
-    DB_PORT = int(os.environ.get("DB_PORT", "3306"))
-    DB_USER = os.environ.get("DB_USER", "root")
-    DB_PASS = os.environ.get("DB_PASS", "Likhith@24")
-    DB_NAME = os.environ.get("DB_NAME", "smart_voting_system")
+    SECRET_KEY = os.getenv("SECRET_KEY", "dev")
+    DB_HOST = os.getenv("DB_HOST", "smartvoting-db.cpkg8mew2xde.ap-south-2.rds.amazonaws.com")
+    DB_PORT = int(os.getenv("DB_PORT", "3306"))
+    DB_USER = os.getenv("DB_USER", "admin")
+    DB_PASS = os.getenv("DB_PASS", "Likhith2411")
+    DB_NAME = os.getenv("DB_NAME", "smartvoting")        # 👈 correct database name
 
     # Mail (for OTP)
     MAIL_USER = os.environ.get("MAIL_USER", "likhithreddygg@gmail.com")
-    MAIL_PASS = os.environ.get("MAIL_PASS", "rlvtgzdrsbhlubjz")
+    MAIL_PASS = os.environ.get("MAIL_PASS", "wrktwoeevomijifv")
 
     # SMS (Fast2SMS)
     FAST2SMS_API_KEY = os.environ.get("FAST2SMS_API_KEY", "")
 
     # Face recognition
     MIN_IMAGES_PER_LABEL = int(os.environ.get("MIN_IMAGES_PER_LABEL", "15"))
-    # Relaxed defaults for easier capture
-    BLUR_THRESHOLD = float(os.environ.get("BLUR_THRESHOLD", "60.0"))  # was 80.0
-    MIN_FACE_SIZE = int(os.environ.get("MIN_FACE_SIZE", "70"))        # was 80
+    BLUR_THRESHOLD = float(os.environ.get("BLUR_THRESHOLD", "60.0"))
+    MIN_FACE_SIZE = int(os.environ.get("MIN_FACE_SIZE", "100"))
 
     # Voting capture limits
     VOTING_MAX_SECONDS = int(os.environ.get("VOTING_MAX_SECONDS", "15"))
@@ -116,15 +116,19 @@ def _require_secrets_in_production():
 # -------------------------
 
 def get_db_connection():
-    return pymysql.connect(
-        host=config.DB_HOST,
-        user=config.DB_USER,
-        password=config.DB_PASS,
-        port=config.DB_PORT,
-        database=config.DB_NAME,
-        autocommit=False,
-        cursorclass=pymysql.cursors.Cursor
+    conn = pymysql.connect(
+        host=Config.DB_HOST,
+        port=Config.DB_PORT,
+        user=Config.DB_USER,
+        password=Config.DB_PASS,
+        database=Config.DB_NAME,  # smartvoting
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=True,
+        # ssl={"ssl": ssl.create_default_context()}  # if you require SSL
     )
+    with conn.cursor() as cur:
+        cur.execute("USE smartvoting")  # ✅ force the schema
+    return conn
 
 def ensure_db_connection():
     global mydb
@@ -137,8 +141,25 @@ def ensure_db_connection():
             pass
         mydb = get_db_connection()
 
+    # Ensure voters table has OTP columns (Schema Migration)
+    try:
+        with mydb.cursor() as cur:
+            cur.execute("ALTER TABLE voters ADD COLUMN otp_code VARCHAR(10)")
+            cur.execute("ALTER TABLE voters ADD COLUMN otp_expires_at DATETIME")
+    except Exception:
+        pass # Columns likely exist
+
 # Keep a global connection for pandas read_sql_query compatibility
 mydb = get_db_connection()
+
+def read_sql(query, conn, params=None):
+    """
+    Replacement for pd.read_sql_query that works with DictCursor.
+    """
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+        result = cur.fetchall()
+    return pd.DataFrame(result)
 
 # -------------------------
 # OpenCV & Face models
@@ -388,7 +409,7 @@ def add_nominee():
                 file.save(os.path.join('static/img', unique_filename))
                 logo_filename = unique_filename
 
-        nominee = pd.read_sql_query('SELECT * FROM nominee', mydb)
+        nominee = read_sql('SELECT * FROM nominee', mydb)
         all_members = set(nominee.member_name.astype(str).str.strip().values) if not nominee.empty else set()
         all_parties = set(nominee.party_name.astype(str).str.strip().values) if not nominee.empty else set()
         
@@ -408,6 +429,10 @@ def add_nominee():
             
     return render_template('nominee.html', admin=session.get('IsAdmin', False))
 
+import logging, datetime, random, time
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
 @app.route('/registration', methods=['POST', 'GET'])
 def registration():
     if request.method == 'POST':
@@ -423,96 +448,238 @@ def registration():
         age_str = request.form.get('age', '').strip()
 
         try:
-            age = int(age_str)
-        except Exception:
-            age = 0
-
-        if age < 18 or age > 120:
-            flash("Age must be between 18 and 120", "warning")
+            age = int(age_str or "0")
+            if age < 18 or age > 120:
+                flash("Age must be between 18 and 120", "warning")
+                return render_template('voter_reg.html')
+            if not valid_email(email):
+                flash("Please enter a valid email address", "warning")
+                return render_template('voter_reg.html')
+            if not valid_phone(pno):
+                flash("Please enter a valid phone number", "warning")
+                return render_template('voter_reg.html')
+        except Exception as e:
+            app.logger.exception("Validation error: %s", e)
+            flash("Invalid input. Please check your details.", "danger")
             return render_template('voter_reg.html')
 
-        if not valid_email(email):
-            flash("Please enter a valid email address", "warning")
-            return render_template('voter_reg.html')
-
-        if not valid_phone(pno):
-            flash("Please enter a valid phone number", "warning")
-            return render_template('voter_reg.html')
-
-        voters = pd.read_sql_query('SELECT aadhar_id, voter_id FROM voters', mydb)
-        all_aadhar_ids = set(voters.aadhar_id.astype(str).str.strip().values) if not voters.empty else set()
-        all_voter_ids = set(voters.voter_id.astype(str).str.strip().values) if not voters.empty else set()
-
-        if (aadhar_id in all_aadhar_ids) or (voter_id in all_voter_ids):
-            flash('Already Registered as a Voter', 'info')
-        else:
-            sql = ('INSERT INTO voters (first_name, middle_name, last_name, aadhar_id, voter_id, email, pno, state, d_name, verified) '
-                   'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)')
+        try:
             with mydb.cursor() as cur:
-                cur.execute(sql, (first_name, middle_name, last_name, aadhar_id, voter_id, email, pno, state, d_name, 'no'))
-            mydb.commit()
-            session['aadhar'] = aadhar_id
-            session['status'] = 'no'
-            session['email'] = email
-            flash("Registration submitted. Please verify your email.", "success")
-            logger.info("Voter registered: %s", aadhar_id)
-            return redirect(url_for('verify'))
-    return render_template('voter_reg.html')
+                cur.execute("SELECT 1")
+        except Exception as e:
+            app.logger.exception("DB connectivity error: %s", e)
+            flash("Database is unavailable right now. Please try again.", "danger")
+            return render_template('voter_reg.html')
 
+        try:
+            with mydb.cursor() as cur:
+                cur.execute("""CREATE TABLE IF NOT EXISTS pending_voters (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    first_name VARCHAR(50), middle_name VARCHAR(50), last_name VARCHAR(50),
+                    aadhar_id VARCHAR(20), voter_id VARCHAR(20),
+                    email VARCHAR(100), pno VARCHAR(15), state VARCHAR(50), d_name VARCHAR(50),
+                    otp_code VARCHAR(10), otp_expires_at DATETIME,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+        except Exception as e:
+            app.logger.exception("Ensuring pending_voters failed: %s", e)
+            flash("Server setup error. Please try again later.", "danger")
+            return render_template('voter_reg.html')
+
+        try:
+            with mydb.cursor() as cur:
+                cur.execute("""CREATE TABLE IF NOT EXISTS voters (
+                    sno INT AUTO_INCREMENT PRIMARY KEY,
+                    first_name VARCHAR(100), middle_name VARCHAR(100), last_name VARCHAR(100),
+                    aadhar_id VARCHAR(100), voter_id VARCHAR(100),
+                    email VARCHAR(100), pno VARCHAR(100), state VARCHAR(100), d_name VARCHAR(100),
+                    verified VARCHAR(100)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+        except Exception as e:
+            app.logger.exception("Ensuring voters table failed: %s", e)
+            flash("Server setup error (voters). Please try again later.", "danger")
+            return render_template('voter_reg.html')
+
+        try:
+            with mydb.cursor() as cur:
+                cur.execute("SELECT COUNT(*) as cnt FROM voters WHERE aadhar_id=%s OR voter_id=%s",
+                            (aadhar_id, voter_id))
+                res = cur.fetchone()
+                exists = res['cnt'] > 0 if res else False
+            if exists:
+                flash("Already Registered as a Voter", "info")
+                return render_template('voter_reg.html')
+        except Exception as e:
+            app.logger.exception("Duplicate check failed: %s", e)
+            flash("We couldn't validate your record right now. Try again later.", "danger")
+            return render_template('voter_reg.html')
+
+        try:
+            otp_code = str(random.randint(100000, 999999))
+            expiry = datetime.datetime.now() + datetime.timedelta(minutes=5)
+            with mydb.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO pending_voters
+                    (first_name, middle_name, last_name, aadhar_id, voter_id, email, pno, state, d_name, otp_code, otp_expires_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (first_name, middle_name, last_name, aadhar_id, voter_id, email, pno, state, d_name, otp_code, expiry))
+            mydb.commit()
+        except Exception as e:
+            app.logger.exception("Insert pending_voters failed: %s", e)
+            flash("Could not start verification. Please try again.", "danger")
+            return render_template('voter_reg.html')
+
+        try:
+            if 'send_otp_email' in globals():
+                send_otp_email(email, otp_code)
+            elif 'send_email_otp' in globals():
+                send_email_otp(email, otp_code)
+            else:
+                app.logger.warning("No OTP email function found; skipping send.")
+        except Exception as e:
+            app.logger.exception("OTP send failed: %s", e)
+            flash("Failed to send OTP. Please try again later.", "danger")
+            return render_template('voter_reg.html')
+
+        session['voter_id'] = voter_id
+        session['email'] = email
+        session['status'] = 'no'
+        session['otp_last_sent'] = int(time.time())
+
+        flash("OTP sent! Please verify to complete registration.", "info")
+        return render_template('verify.html')
+
+    return render_template('voter_reg.html')
 @app.route('/verify', methods=['POST', 'GET'])
 def verify():
-    if session.get('status') == 'no':
-        if request.method == 'POST':
-            otp_check = request.form.get('otp_check', '').strip()
-            otp_stored = session.get('otp')
-            otp_expiry = session.get('otp_expiry', 0)
-            now = int(time.time())
-            if not otp_stored or now > otp_expiry:
-                flash("OTP expired. Please request a new one.", "warning")
-                return redirect(url_for('verify'))
-            if otp_check == otp_stored:
-                session['status'] = 'yes'
-                sql = "UPDATE voters SET verified=%s WHERE aadhar_id=%s"
-                with mydb.cursor() as cur:
-                    cur.execute(sql, (session['status'], session['aadhar']))
-                mydb.commit()
-                flash("Email verified successfully", 'success')
-                logger.info("Email verified for aadhar: %s", session.get('aadhar'))
-                # Decide next step based on session flag
+    try:
+        if session.get('status') == 'no':
+            if request.method == 'POST':
+                otp_check = request.form.get('otp_check', '').strip()
+                voter_id = session.get('voter_id')
+                if not voter_id:
+                    flash("Session expired. Please re-register.", "danger")
+                    return redirect(url_for('registration'))
+                with mydb.cursor(pymysql.cursors.DictCursor) as cur:
+                    # Use Python time for consistency
+                    now_time = datetime.datetime.now()
+                    
+                    # 1. Try Pending Voters (Registration)
+                    cur.execute("""
+                        SELECT * FROM pending_voters
+                        WHERE voter_id=%s AND otp_code=%s AND otp_expires_at > %s
+                    """, (voter_id, otp_check, now_time))
+                    pending = cur.fetchone()
+                    
+                    if pending:
+                        # Registration Success
+                        cur.execute("""
+                            INSERT INTO voters (first_name, middle_name, last_name, aadhar_id, voter_id,
+                                                email, pno, state, d_name, verified)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        """, (pending['first_name'], pending['middle_name'], pending['last_name'],
+                                pending['aadhar_id'], pending['voter_id'], pending['email'],
+                                pending['pno'], pending['state'], pending['d_name'], 'yes'))
+                        cur.execute("DELETE FROM pending_voters WHERE id=%s", (pending['id'],))
+                        mydb.commit()
+                        
+                        session['status'] = 'yes'
+                        session['aadhar'] = pending['aadhar_id']
+                        flash("Email verified successfully!", "success")
+                        logger.info("Email verified (registration) for aadhar: %s", session.get('aadhar'))
+                        
+                    else:
+                        # 2. Try Active Voters (Voting Login)
+                        cur.execute("""
+                            SELECT * FROM voters
+                            WHERE voter_id=%s AND otp_code=%s AND otp_expires_at > %s
+                        """, (voter_id, otp_check, now_time))
+                        voter = cur.fetchone()
+                        
+                        if voter:
+                            # Login Verification Success
+                            # Clear OTP to prevent reuse
+                            cur.execute("UPDATE voters SET otp_code=NULL, otp_expires_at=NULL WHERE voter_id=%s", (voter_id,))
+                            mydb.commit()
+                            
+                            session['status'] = 'yes'
+                            session['aadhar'] = voter['aadhar_id']
+                            flash("Identity verified successfully!", "success")
+                            logger.info("Identity verified (login) for aadhar: %s", session.get('aadhar'))
+                        else:
+                            # Failed both
+                            logger.warning(f"OTP Fail for {voter_id}: Input={otp_check} (Checked Pending & Active)")
+                            flash("Invalid or expired OTP. Please try again.", "warning")
+                            return render_template('verify.html')
+
                 next_step = session.pop('post_verify_next', None)
                 if next_step == 'voting':
-                    flash("Email verified. Continue to voting.", "success")
+                    flash("Verified. Continue to voting.", "success")
                     return redirect(url_for('voting'))
-                # default: training flow
                 return redirect(url_for('capture_images'))
             else:
-                flash("Wrong OTP. Please try again.", "warning")
-                return redirect(url_for('verify'))
-        else:
-            now = int(time.time())
-            last_sent = session.get('otp_last_sent', 0)
-            if now - last_sent < config.OTP_RESEND_MIN_INTERVAL:
-                wait = config.OTP_RESEND_MIN_INTERVAL - (now - last_sent)
-                flash(f"Please wait {wait}s before requesting another OTP.", "info")
+                # Resend Logic
+                now = int(time.time())
+                last_sent = session.get('otp_last_sent', 0)
+                wait_min = getattr(config, 'OTP_RESEND_MIN_INTERVAL', 30)
+                if now - last_sent < wait_min:
+                    wait = wait_min - (now - last_sent)
+                    flash(f"Please wait {wait}s before requesting another OTP.", "info")
+                    return render_template('verify.html')
+                
+                receiver_address = session.get('email')
+                voter_id = session.get('voter_id')
+                
+                if not receiver_address or not voter_id:
+                    flash("Missing session data. Please re-register/login.", "danger")
+                    return redirect(url_for('registration'))
+                
+                otp_code = str(random.randint(100000, 999999))
+                expiry = datetime.datetime.now() + datetime.timedelta(minutes=5)
+                
+                try:
+                    with mydb.cursor() as cur:
+                        # Check where the user is
+                        cur.execute("SELECT 1 FROM pending_voters WHERE voter_id=%s", (voter_id,))
+                        is_pending = cur.fetchone()
+                        
+                        if is_pending:
+                            cur.execute("""
+                                UPDATE pending_voters
+                                SET otp_code=%s, otp_expires_at=%s
+                                WHERE voter_id=%s
+                            """, (otp_code, expiry, voter_id))
+                        else:
+                            # Assume active voter
+                            cur.execute("""
+                                UPDATE voters
+                                SET otp_code=%s, otp_expires_at=%s
+                                WHERE voter_id=%s
+                            """, (otp_code, expiry, voter_id))
+                        mydb.commit()
+                    
+                    if 'send_otp_email' in globals():
+                        send_otp_email(receiver_address, otp_code)
+                    elif 'send_email_otp' in globals():
+                        send_email_otp(receiver_address, otp_code)
+                    
+                    session['otp_last_sent'] = now
+                    flash("OTP sent to your email.", "info")
+                except Exception as e:
+                    app.logger.error("Failed to resend OTP: %s", e)
+                    flash("Failed to send OTP. Please try again later.", "danger")
                 return render_template('verify.html')
-
-            receiver_address = session.get('email')
-            if not receiver_address:
-                flash("Missing email in session. Please re-register.", "danger")
-                return redirect(url_for('registration'))
-
-            otp_code = str(np.random.randint(100000, 999999))
-            if send_otp_email(receiver_address, otp_code):
-                session['otp'] = otp_code
-                session['otp_expiry'] = now + config.OTP_EXPIRY_SECONDS
-                session['otp_last_sent'] = now
-                flash("OTP sent to your email.", "info")
-            else:
-                flash("Failed to send OTP. Please try again later.", "danger")
-    else:
-        flash("Your email is already verified", 'warning')
-    return render_template('verify.html')
-
+        else:
+            flash("Your email is already verified", "warning")
+            return redirect(url_for('capture_images'))
+    except pymysql.err.IntegrityError as dup:
+        app.logger.warning("Duplicate during verify: %s", dup)
+        flash("This voter already exists in the system.", "warning")
+        return redirect(url_for('login'))
+    except Exception as e:
+        app.logger.error("Error in /verify route: %s", e)
+        flash("Something went wrong during verification. Please try again later.", "danger")
+        return redirect(url_for('registration'))
 @app.route('/capture_images', methods=['POST', 'GET'])
 def capture_images():
     # Guard: require logged-in aadhar and verified email before allowing capture
@@ -865,7 +1032,7 @@ def updateback():
         except Exception:
             age = 0
 
-        voters = pd.read_sql_query('SELECT aadhar_id FROM voters', mydb)
+        voters = read_sql('SELECT aadhar_id FROM voters', mydb)
         all_aadhar_ids = set(voters.aadhar_id.astype(str).str.strip().values) if not voters.empty else set()
 
         if age < 18 or age > 120:
@@ -908,7 +1075,7 @@ def login_details():
 
         try:
             # 1. Check if user exists by Aadhar first
-            df_aadhar = pd.read_sql_query('SELECT * FROM voters WHERE aadhar_id=%s LIMIT 1', mydb, params=[aadhar])
+            df_aadhar = read_sql('SELECT * FROM voters WHERE aadhar_id=%s LIMIT 1', mydb, params=[aadhar])
             
             if df_aadhar.empty:
                 flash("User not found. Please register first.", "danger")
@@ -930,6 +1097,7 @@ def login_details():
             # Set session
             session['aadhar'] = str(user_row['aadhar_id'])
             session['email'] = db_email
+            session['voter_id'] = db_voter_id # Ensure voter_id is in session for verify
             
             # Always force 'no' to require OTP on every login
             session['status'] = 'no' 
@@ -937,13 +1105,36 @@ def login_details():
 
             # 4. Check if already voted
             try:
-                df_exists = pd.read_sql_query('SELECT 1 FROM vote WHERE aadhar=%s LIMIT 1', mydb, params=[session['aadhar']])
+                df_exists = read_sql('SELECT 1 FROM vote WHERE aadhar=%s LIMIT 1', mydb, params=[session['aadhar']])
                 if not df_exists.empty:
                     return redirect(url_for('already_voted'))
             except Exception as e:
                 logger.warning("Login duplicate check failed: %s", e)
 
-            flash("Details matched. Please verify your email to continue.", "info")
+            # Generate and Send OTP for Voting Login
+            otp_code = str(random.randint(100000, 999999))
+            expiry = datetime.datetime.now() + datetime.timedelta(minutes=5)
+            
+            try:
+                with mydb.cursor() as cur:
+                    cur.execute("""
+                        UPDATE voters 
+                        SET otp_code=%s, otp_expires_at=%s 
+                        WHERE voter_id=%s
+                    """, (otp_code, expiry, db_voter_id))
+                
+                if 'send_otp_email' in globals():
+                    send_otp_email(db_email, otp_code)
+                elif 'send_email_otp' in globals():
+                    send_email_otp(db_email, otp_code)
+                
+                session['otp_last_sent'] = int(time.time())
+                flash("Details matched. OTP sent to your email.", "info")
+            except Exception as e:
+                logger.error("Failed to generate/send voting OTP: %s", e)
+                flash("Error sending OTP. Please try again.", "danger")
+                return render_template('login_details.html')
+
             return redirect(url_for('verify'))
 
         except Exception as e:
@@ -962,7 +1153,7 @@ def login_aadhar():
             flash("Please enter your Aadhar ID.", "warning")
             return redirect(url_for('login_aadhar'))
         try:
-            df = pd.read_sql_query('SELECT aadhar_id, email, verified FROM voters WHERE aadhar_id=%s LIMIT 1', mydb, params=[aadhar])
+            df = read_sql('SELECT aadhar_id, email, verified FROM voters WHERE aadhar_id=%s LIMIT 1', mydb, params=[aadhar])
             if df.empty:
                 flash("Aadhar not found. Please register first.", "warning")
                 return redirect(url_for('login_aadhar'))
@@ -1018,7 +1209,7 @@ def voting():
             return redirect(url_for('verify'))
 
         try:
-            df_exists = pd.read_sql_query('SELECT 1 FROM vote WHERE aadhar=%s LIMIT 1', mydb, params=[expected_aadhar])
+            df_exists = read_sql('SELECT 1 FROM vote WHERE aadhar=%s LIMIT 1', mydb, params=[expected_aadhar])
             if not df_exists.empty:
                 # User already voted. Redirect to already_voted page.
                 return redirect(url_for('already_voted'))
@@ -1107,7 +1298,7 @@ def voting():
         if det_aadhar:
             # Post-recognition duplicate-vote check (A3): if already voted, show message and stop
             try:
-                df_exists = pd.read_sql_query('SELECT 1 FROM vote WHERE aadhar=%s LIMIT 1', mydb, params=[det_aadhar])
+                df_exists = read_sql('SELECT 1 FROM vote WHERE aadhar=%s LIMIT 1', mydb, params=[det_aadhar])
                 if not df_exists.empty:
                     flash("You already voted", "warning")
                     return render_template('voting.html')
@@ -1139,7 +1330,7 @@ def voting_override():
         flash("Aadhar is required to override.", "warning")
         return redirect(url_for('voting'))
     try:
-        df = pd.read_sql_query('SELECT aadhar_id FROM voters WHERE aadhar_id=%s', mydb, params=[aadhar])
+        df = read_sql('SELECT aadhar_id FROM voters WHERE aadhar_id=%s', mydb, params=[aadhar])
         if df.empty:
             flash("Aadhar not found in voters.", "danger")
             return redirect(url_for('voting'))
@@ -1159,7 +1350,7 @@ def select_candidate():
         flash("No detected voter found. Please try voting again.", "warning")
         return redirect(url_for('voting'))
 
-    df_nom = pd.read_sql_query('SELECT * FROM nominee', mydb)
+    df_nom = read_sql('SELECT * FROM nominee', mydb)
     # We need full rows for the template (result) AND symbol names for validation (all_nom)
     all_nom = df_nom['symbol_name'].values if not df_nom.empty else []
     
@@ -1167,7 +1358,7 @@ def select_candidate():
         flash("No nominees available yet. Please contact admin.", "info")
         return redirect(url_for('home'))
 
-    g = pd.read_sql_query('SELECT aadhar FROM vote', mydb)
+    g = read_sql('SELECT aadhar FROM vote', mydb)
     all_adhar = g['aadhar'].values if not g.empty else []
     if aadhar in all_adhar:
         flash("You already voted", "warning")
@@ -1179,7 +1370,7 @@ def select_candidate():
 
             # Defensive, authoritative check immediately before insert
             try:
-                df_exists = pd.read_sql_query('SELECT 1 FROM vote WHERE aadhar=%s LIMIT 1', mydb, params=[aadhar])
+                df_exists = read_sql('SELECT 1 FROM vote WHERE aadhar=%s LIMIT 1', mydb, params=[aadhar])
                 if not df_exists.empty:
                     flash("You already voted", "warning")
                     logger.info("Duplicate vote prevented for aadhar: %s", aadhar)
@@ -1192,12 +1383,26 @@ def select_candidate():
                 flash("Invalid candidate selected.", "danger")
                 return render_template('select_candidate.html', result=df_nom.values)
             
-            session['vote'] = vote
-            sql = "INSERT INTO vote (vote, aadhar) VALUES (%s, %s)"
+            # Look up the ID for the selected symbol (Fix for FK constraint)
             try:
+                df_selected = read_sql('SELECT id FROM nominee WHERE symbol_name=%s', mydb, params=[vote])
+                if df_selected.empty:
+                    flash("Invalid candidate selected (ID not found).", "danger")
+                    return render_template('select_candidate.html', result=df_nom.values)
+                
+                vote_id = int(df_selected.iloc[0]['id'])
+                
+                session['vote'] = vote # Keep symbol in session for display if needed
+                
+                # Insert the ID
+                sql = "INSERT INTO vote (vote, aadhar) VALUES (%s, %s)"
                 with mydb.cursor() as cur:
-                    cur.execute(sql, (vote, aadhar))
+                    cur.execute(sql, (vote_id, aadhar))
                 mydb.commit()
+            except Exception as e:
+                logger.error("Vote insertion failed: %s", e)
+                flash("Error recording vote. Please try again.", "danger")
+                return redirect(url_for('home'))
             except pymysql.err.IntegrityError as e:
                 # In case a unique index exists on aadhar, catch and inform the user.
                 logger.info("IntegrityError on vote insert for aadhar=%s: %s", aadhar, e)
@@ -1207,7 +1412,7 @@ def select_candidate():
             if config.FAST2SMS_API_KEY:
                 try:
                     s = "SELECT pno, first_name FROM voters WHERE aadhar_id=%s"
-                    c = pd.read_sql_query(s, mydb, params=[aadhar])
+                    c = read_sql(s, mydb, params=[aadhar])
                     pno = str(c.values[0][0])
                     name = str(c.values[0][1])
                     url = "https://www.fast2sms.com/dev/bulkV2"
@@ -1246,10 +1451,10 @@ def select_candidate():
 @app.route('/voting_res')
 def voting_res():
     # Get all nominees
-    df_nom = pd.read_sql_query('SELECT * FROM nominee', mydb)
+    df_nom = read_sql('SELECT * FROM nominee', mydb)
     
     # Get all votes
-    votes_df = pd.read_sql_query('SELECT * FROM vote', mydb)
+    votes_df = read_sql('SELECT * FROM vote', mydb)
     
     result = []
     if not df_nom.empty:
@@ -1262,7 +1467,8 @@ def voting_res():
         # Iterate over df_nom rows
         for index, row in df_nom.iterrows():
             symbol = str(row['symbol_name'])
-            count = vote_counts.get(symbol, 0)
+            # Use ID to get count (Fix for schema change)
+            count = vote_counts.get(row['id'], 0)
             # Create a list matching the template's expected indices
             # row[0]=id (unused in template), row[1]=name, row[2]=party, row[3]=symbol, row[4]=count
             entry = [
@@ -1299,9 +1505,9 @@ def already_voted():
 def admin_summary():
     if not _require_admin():
         return "Unauthorized", 403
-    voters = pd.read_sql_query('SELECT COUNT(*) AS total, SUM(verified="yes") AS verified FROM voters', mydb)
-    nominees = pd.read_sql_query('SELECT COUNT(*) AS total FROM nominee', mydb)
-    votes = pd.read_sql_query('SELECT COUNT(*) AS total FROM vote', mydb)
+    voters = read_sql('SELECT COUNT(*) AS total, SUM(verified="yes") AS verified FROM voters', mydb)
+    nominees = read_sql('SELECT COUNT(*) AS total FROM nominee', mydb)
+    votes = read_sql('SELECT COUNT(*) AS total FROM vote', mydb)
     voters_total = int(voters.iloc[0]['total'] or 0)
     voters_verified = int(voters.iloc[0]['verified'] or 0)
     nominees_total = int(nominees.iloc[0]['total'] or 0)
@@ -1321,21 +1527,21 @@ def admin_summary():
 def debug_db_voters():
     if not _require_admin():
         return "Unauthorized", 403
-    df = pd.read_sql_query('SELECT * FROM voters ORDER BY aadhar_id DESC LIMIT 100', mydb)
+    df = read_sql('SELECT * FROM voters ORDER BY aadhar_id DESC LIMIT 100', mydb)
     return df.to_html(index=False)
 
 @app.route('/debug/db/nominees')
 def debug_db_nominees():
     if not _require_admin():
         return "Unauthorized", 403
-    df = pd.read_sql_query('SELECT * FROM nominee ORDER BY member_name ASC LIMIT 100', mydb)
+    df = read_sql('SELECT * FROM nominee ORDER BY member_name ASC LIMIT 100', mydb)
     return df.to_html(index=False)
 
 @app.route('/debug/db/votes')
 def debug_db_votes():
     if not _require_admin():
         return "Unauthorized", 403
-    df = pd.read_sql_query('SELECT * FROM vote ORDER BY id DESC LIMIT 100', mydb)
+    df = read_sql('SELECT * FROM vote ORDER BY id DESC LIMIT 100', mydb)
     return df.to_html(index=False)
 
 @app.route('/debug/session')
@@ -1507,9 +1713,9 @@ if __name__ == '__main__':
 
     if config.SECRET_KEY == "dev-secret-key-change-me":
         logger.warning("Using default SECRET_KEY. Set SECRET_KEY env var for production.")
-    if config.DB_PASS == "Likhith@24":
+    if config.DB_PASS == "Likhith2411":
         logger.warning("Using default DB_PASS. Set DB_* env vars for production.")
-    if config.MAIL_USER == "ssrikar888@gmail.comß":
+    if config.MAIL_USER == "likhithreddygg@gmail.com":
         logger.warning("Configure MAIL_USER/MAIL_PASS for OTP emails.")
 
     db_ok = True

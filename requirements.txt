@@ -1,0 +1,15 @@
+Flask
+gunicorn
+Jinja2
+Werkzeug
+itsdangerous
+click
+
+opencv-contrib-python-headless
+numpy
+pillow
+scikit-learn
+imutils
+
+PyMySQL==1.1.1
+pandas
