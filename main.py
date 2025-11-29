@@ -281,7 +281,9 @@ def valid_phone(pno: str) -> bool:
     return 8 <= len(digits) <= 15
 
 def send_otp_email(to_address: str, otp_code: str) -> bool:
-    import os, threading, logging, time, requests
+    import os, threading, logging, time, requests, smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
 
     logger = logging.getLogger(__name__)
 
@@ -293,11 +295,16 @@ def send_otp_email(to_address: str, otp_code: str) -> bool:
             except Exception:
                 config = None
 
-            # Sender address
+            # Determine Sender Address
+            # 1. Prefer RESEND_FROM for Resend API (e.g., "onboarding@resend.dev" or "auth@yourdomain.com")
+            resend_from = os.environ.get("RESEND_FROM")
+            
+            # 2. Fallback to MAIL_FROM or MAIL_USER for SMTP
             mail_from = os.environ.get("MAIL_FROM")
             if not mail_from:
                 mail_from = (
                     (getattr(config, "MAIL_USER", None) if config else None)
+                    or os.environ.get("MAIL_USER")
                     or os.environ.get("MAIL_USERNAME")
                     or "noreply@example.com"
                 )
@@ -308,47 +315,98 @@ def send_otp_email(to_address: str, otp_code: str) -> bool:
             else:
                 expiry_minutes = int(os.environ.get("OTP_EXPIRY_SECONDS", "300")) // 60
 
-            # Resend API key
+            # ---------------------------------------------------------
+            # STRATEGY 1: Resend API (HTTP) - Works on Render Free Tier
+            # ---------------------------------------------------------
             api_key = os.environ.get("RESEND_API_KEY")
-            if not api_key:
-                raise RuntimeError("RESEND_API_KEY not set in environment")
-
-            # Build email payload
-            payload = {
-                "from": mail_from,
-                "to": [to_address],
-                "subject": "Your OTP Code for Smart Voting",
-                "html": (
-                    f"<p>Your OTP is <b>{otp_code}</b>.</p>"
-                    f"<p>This code will expire in {expiry_minutes} minutes.</p>"
-                ),
-            }
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            }
-
-            # Try sending with up to 3 retries
-            for attempt in range(3):
-                try:
-                    resp = requests.post(
-                        "https://api.resend.com/emails",
-                        json=payload,
-                        headers=headers,
-                        timeout=15,
+            if api_key:
+                # Use RESEND_FROM if set, otherwise fallback to mail_from
+                sender = resend_from if resend_from else mail_from
+                
+                # Warning for generic emails with Resend
+                if "@gmail.com" in sender or "@yahoo.com" in sender:
+                    logger.warning(
+                        "⚠️ Using a generic email (%s) with Resend may fail. "
+                        "Use 'onboarding@resend.dev' (for testing) or a verified domain.", 
+                        sender
                     )
-                    if 200 <= resp.status_code < 300:
-                        logger.info("✅ OTP email dispatched to %s via Resend", to_address)
-                        return
-                    else:
-                        logger.error(
-                            "Resend error (HTTP %s): %s", resp.status_code, resp.text
-                        )
-                except Exception as e:
-                    logger.error("Resend request failed (attempt %d): %r", attempt + 1, e)
-                time.sleep(1.5 * (attempt + 1))
 
-            raise RuntimeError("Email send failed after 3 retries via Resend")
+                # Build email payload
+                payload = {
+                    "from": sender,
+                    "to": [to_address],
+                    "subject": "Your OTP Code for Smart Voting",
+                    "html": (
+                        f"<p>Your OTP is <b>{otp_code}</b>.</p>"
+                        f"<p>This code will expire in {expiry_minutes} minutes.</p>"
+                    ),
+                }
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                }
+
+                # Try sending with up to 3 retries
+                for attempt in range(3):
+                    try:
+                        resp = requests.post(
+                            "https://api.resend.com/emails",
+                            json=payload,
+                            headers=headers,
+                            timeout=15,
+                        )
+                        if 200 <= resp.status_code < 300:
+                            logger.info("✅ OTP email dispatched to %s via Resend (Sender: %s)", to_address, sender)
+                            return
+                        else:
+                            logger.error(
+                                "Resend error (HTTP %s): %s", resp.status_code, resp.text
+                            )
+                    except Exception as e:
+                        logger.error("Resend request failed (attempt %d): %r", attempt + 1, e)
+                    time.sleep(1.5 * (attempt + 1))
+                
+                logger.warning("Resend failed after retries. Trying SMTP fallback...")
+
+            # ---------------------------------------------------------
+            # STRATEGY 2: SMTP (Standard) - May be blocked on Render Free
+            # ---------------------------------------------------------
+            mail_user = os.environ.get("MAIL_USER")
+            mail_pass = os.environ.get("MAIL_PASS")
+            mail_server = os.environ.get("MAIL_SERVER", "smtp.gmail.com")
+            mail_port = int(os.environ.get("MAIL_PORT", "587"))
+
+            if mail_user and mail_pass:
+                msg = MIMEMultipart()
+                msg['From'] = mail_from
+                msg['To'] = to_address
+                msg['Subject'] = "Your OTP Code for Smart Voting"
+
+                body = (
+                    f"Your OTP is {otp_code}.\n"
+                    f"This code will expire in {expiry_minutes} minutes."
+                )
+                msg.attach(MIMEText(body, 'plain'))
+
+                try:
+                    server = smtplib.SMTP(mail_server, mail_port)
+                    server.starttls()
+                    server.login(mail_user, mail_pass)
+                    text = msg.as_string()
+                    server.sendmail(mail_from, to_address, text)
+                    server.quit()
+                    logger.info("✅ OTP email dispatched to %s via SMTP", to_address)
+                    return
+                except Exception as e:
+                    logger.error("❌ SMTP email failed: %s. (Note: Render Free Tier blocks SMTP ports)", repr(e))
+                    # Don't raise here if we want to just log the failure, 
+                    # but raising helps debugging if it was the only method.
+                    if not api_key:
+                        raise e
+            else:
+                if not api_key:
+                    logger.error("❌ No valid email configuration found (Resend or SMTP).")
+                    raise RuntimeError("No valid email configuration found")
 
         except Exception as e:
             logger.error("❌ OTP email failed: %s", repr(e))
