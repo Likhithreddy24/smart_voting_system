@@ -43,7 +43,7 @@ class Config:
 
     # Mail (for OTP)
     MAIL_USER = os.environ.get("MAIL_USER", "likhithreddygg@gmail.com")
-    MAIL_PASS = os.environ.get("MAIL_PASS", "wrktwoeevomijifv")
+    MAIL_PASS = os.environ.get("MAIL_PASS", "ltindlsamolfsjoc")
 
     # SMS (Fast2SMS)
     FAST2SMS_API_KEY = os.environ.get("FAST2SMS_API_KEY", "")
@@ -281,23 +281,63 @@ def valid_phone(pno: str) -> bool:
     return 8 <= len(digits) <= 15
 
 def send_otp_email(to_address: str, otp_code: str) -> bool:
-    try:
-        message = MIMEMultipart()
-        message['From'] = config.MAIL_USER
-        message['To'] = to_address
-        message['Subject'] = "Your OTP Code for Smart Voting"
-        body = f"Your OTP is: {otp_code}\nThis code will expire in {config.OTP_EXPIRY_SECONDS // 60} minutes."
-        message.attach(MIMEText(body, 'plain'))
-        smtp = smtplib.SMTP('smtp.gmail.com', 587)
-        smtp.starttls()
-        smtp.login(config.MAIL_USER, config.MAIL_PASS)
-        smtp.sendmail(config.MAIL_USER, to_address, message.as_string())
-        smtp.quit()
-        logger.info("OTP sent to %s", to_address)
-        return True
-    except Exception as e:
-        logger.exception("Failed to send OTP email: %s", e)
-        return False
+    import threading
+    def _worker():
+        try:
+            import smtplib, ssl
+            from email.mime.text import MIMEText
+            
+            import certifi
+            
+            # Use Config or Env vars
+            host = os.environ.get("MAIL_HOST", "smtp.gmail.com")
+            # Default to 465 (SSL) which is often more reliable in cloud environments
+            port = int(os.environ.get("MAIL_PORT", "465"))
+            username = config.MAIL_USER or os.environ.get("MAIL_USERNAME")
+            password = config.MAIL_PASS or os.environ.get("MAIL_PASSWORD")
+            mail_from = os.environ.get("MAIL_FROM", username)
+            
+            if not (username and password):
+                logger.warning("MAIL_USER / MAIL_PASS not set; skipping email send")
+                return
+
+            logger.info(f"Attempting to connect to SMTP server: {host}:{port} (SSL={'Yes' if port==465 else 'No'})")
+
+
+            msg = MIMEMultipart()
+            msg["Subject"] = "Your OTP Code for Smart Voting"
+            msg["From"] = mail_from
+            msg["To"] = to_address
+            
+            body = f"Your OTP is: {otp_code}\nThis code will expire in {config.OTP_EXPIRY_SECONDS // 60} minutes."
+            msg.attach(MIMEText(body, 'plain'))
+            
+            # Use certifi to get the path to the CA bundle
+            context = ssl.create_default_context(cafile=certifi.where())
+            
+            if port == 465:
+                # Use SMTP_SSL for port 465
+                with smtplib.SMTP_SSL(host, port, context=context, timeout=20) as smtp:
+                    smtp.login(username, password)
+                    smtp.send_message(msg)
+            else:
+                # Use STARTTLS for other ports (e.g. 587)
+                with smtplib.SMTP(host, port, timeout=20) as smtp:
+                    smtp.ehlo()
+                    try:
+                        smtp.starttls(context=context)
+                        smtp.ehlo()
+                    except Exception as e:
+                        logger.warning("STARTTLS failed (continuing): %s", e)
+                    smtp.login(username, password)
+                    smtp.send_message(msg)
+                    
+            logger.info("✅ OTP email dispatched to %s", to_address)
+        except Exception as e:
+            logger.error("❌ OTP email failed: %s", repr(e))
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return True
 
 def _client_ip_allowed() -> bool:
     if not config.ADMIN_IP_ALLOWLIST.strip():
@@ -1100,7 +1140,7 @@ def login_details():
             session['voter_id'] = db_voter_id # Ensure voter_id is in session for verify
             
             # Always force 'no' to require OTP on every login
-            session['status'] = 'no' 
+            session['status'] = 'no'
             session['post_verify_next'] = 'voting'
 
             # 4. Check if already voted
@@ -1472,10 +1512,10 @@ def voting_res():
             # Create a list matching the template's expected indices
             # row[0]=id (unused in template), row[1]=name, row[2]=party, row[3]=symbol, row[4]=count
             entry = [
-                row['id'], 
-                row['member_name'], 
-                row['party_name'], 
-                symbol, 
+                row['id'],
+                row['member_name'],
+                row['party_name'],
+                symbol,
                 count
             ]
             result.append(entry)
@@ -1734,4 +1774,9 @@ if __name__ == '__main__':
         if not app.debug:
             raise SystemExit(1)
 
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=int(__import__("os").environ.get("PORT", 5000)))
+
+
+
+
+
