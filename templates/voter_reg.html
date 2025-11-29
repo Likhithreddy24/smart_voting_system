@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>Online Voting System - Voter Registration</title>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+
+    <link href="static/img/favicon.ico" rel="icon">
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700;800&display=swap"
+        rel="stylesheet">
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.10.0/css/all.min.css" rel="stylesheet">
+    <link href="static/lib/animate/animate.min.css" rel="stylesheet">
+    <link href="static/lib/owlcarousel/assets/owl.carousel.min.css" rel="stylesheet">
+    <link href="static/lib/lightbox/css/lightbox.min.css" rel="stylesheet">
+    <link href="static/css/style.css" rel="stylesheet">
+    <link href="static/css/theme.css" rel="stylesheet">
+</head>
+
+<body>
+    <div class="navbar navbar-expand-lg navbar-dark" style="height: var(--navbar-h);">
+        <div class="container">
+            <a class="navbar-brand font-weight-bold text-white" href="{{ url_for('home') }}">
+                <i class="fas fa-vote-yea mr-2"></i>Smart Voting
+            </a>
+            <button type="button" class="navbar-toggler" data-toggle="collapse" data-target="#navbarCollapse">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+
+            <div class="collapse navbar-collapse justify-content-end" id="navbarCollapse">
+                <div class="navbar-nav">
+                    <a href="{{ url_for('home') }}" class="nav-item nav-link">Home</a>
+                    <a href="{{ url_for('admin') }}" class="nav-item nav-link">Admin</a>
+                    <a href="{{ url_for('login_details') }}" class="nav-item nav-link">Vote</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="hero">
+        <div class="container">
+            <div class="glass-card">
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                {% for category, message in messages %}
+                <div class="alert alert-{{ category }} mb-4">
+                    {{ message }}
+                </div>
+                {% endfor %}
+                {% endif %}
+                {% endwith %}
+
+                <h1 class="page-title">Voter Registration</h1>
+                <p class="subtitle">Join the digital democracy. Register securely below.</p>
+
+                <form action="{{ url_for('registration') }}" method="post" class="mt-4">
+                    <div class="row">
+                        <div class="col-md-4 form-group">
+                            <label class="text-white">First Name</label>
+                            <input type="text" name="first_name" class="form-control" placeholder="First Name"
+                                required />
+                        </div>
+                        <div class="col-md-4 form-group">
+                            <label class="text-white">Middle Name</label>
+                            <input type="text" name="middle_name" class="form-control" placeholder="Optional" />
+                        </div>
+                        <div class="col-md-4 form-group">
+                            <label class="text-white">Last Name</label>
+                            <input type="text" name="last_name" class="form-control" placeholder="Last Name" required />
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6 form-group">
+                            <label class="text-white">Aadhar Number</label>
+                            <input type="text" name="aadhar_id" class="form-control" placeholder="12 Digit Aadhar"
+                                required pattern="[0-9]{12}" title="Must be 12 digits" maxlength="12" />
+                        </div>
+                        <div class="col-md-6 form-group">
+                            <label class="text-white">Voter ID</label>
+                            <input type="text" name="voter_id" class="form-control"
+                                placeholder="8 Char ID (e.g. ABC12345)" required pattern="(?=.*[0-9])(?=.*[A-Z]).{8}"
+                                title="Must contain numbers and uppercase letters (8 chars)" />
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-4 form-group">
+                            <label class="text-white">Email Address</label>
+                            <input type="email" name="email" class="form-control" placeholder="name@example.com"
+                                required />
+                        </div>
+                        <div class="col-md-4 form-group">
+                            <label class="text-white">Mobile Number</label>
+                            <input type="tel" name="pno" class="form-control" placeholder="10 Digit Mobile"
+                                pattern="[0-9]{10}" required />
+                        </div>
+                        <div class="col-md-4 form-group">
+                            <label class="text-white">Age</label>
+                            <input type="number" name="age" class="form-control" placeholder="Age (18+)" required
+                                min="18" />
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6 form-group">
+                            <label class="text-white">State</label>
+                            <select class="form-control" name="state" id="inputState" required>
+                                <option value="">Select State</option>
+                                <option value="Andra Pradesh">Andra Pradesh</option>
+                                <option value="Arunachal Pradesh">Arunachal Pradesh</option>
+                                <option value="Assam">Assam</option>
+                                <option value="Bihar">Bihar</option>
+                                <option value="Chhattisgarh">Chhattisgarh</option>
+                                <option value="Goa">Goa</option>
+                                <option value="Gujarat">Gujarat</option>
+                                <option value="Haryana">Haryana</option>
+                                <option value="Himachal Pradesh">Himachal Pradesh</option>
+                                <option value="Jammu and Kashmir">Jammu and Kashmir</option>
+                                <option value="Jharkhand">Jharkhand</option>
+                                <option value="Karnataka">Karnataka</option>
+                                <option value="Kerala">Kerala</option>
+                                <option value="Madya Pradesh">Madya Pradesh</option>
+                                <option value="Maharashtra">Maharashtra</option>
+                                <option value="Manipur">Manipur</option>
+                                <option value="Meghalaya">Meghalaya</option>
+                                <option value="Mizoram">Mizoram</option>
+                                <option value="Nagaland">Nagaland</option>
+                                <option value="Orissa">Orissa</option>
+                                <option value="Punjab">Punjab</option>
+                                <option value="Rajasthan">Rajasthan</option>
+                                <option value="Sikkim">Sikkim</option>
+                                <option value="Tamil Nadu">Tamil Nadu</option>
+                                <option value="Telangana">Telangana</option>
+                                <option value="Tripura">Tripura</option>
+                                <option value="Uttaranchal">Uttaranchal</option>
+                                <option value="Uttar Pradesh">Uttar Pradesh</option>
+                                <option value="West Bengal">West Bengal</option>
+                                <option disabled>UNION Territories</option>
+                                <option value="Andaman and Nicobar Islands">Andaman and Nicobar Islands</option>
+                                <option value="Chandigarh">Chandigarh</option>
+                                <option value="Dadar and Nagar Haveli">Dadar and Nagar Haveli</option>
+                                <option value="Daman and Diu">Daman and Diu</option>
+                                <option value="Delhi">Delhi</option>
+                                <option value="Lakshadeep">Lakshadeep</option>
+                                <option value="Pondicherry">Pondicherry</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6 form-group">
+                            <label class="text-white">District</label>
+                            <select class="form-control" name="d_name" id="inputDistrict" required>
+                                <option value="">-- select state first -- </option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="text-center mt-4">
+                        <button type="submit" class="btn btn-primary btn-lg px-5">
+                            <i class="fas fa-paper-plane mr-2"></i> Register & Verify Email
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/js/bootstrap.bundle.min.js"></script>
+    <script src="static/js/main.js"></script>
+    <script src="static/js/distric.js"></script>
+</body>
+
+</html>

@@ -1,0 +1,1531 @@
+import os
+import re
+import io
+import time
+import datetime
+import shutil
+import logging
+import pickle
+import zipfile
+import tempfile
+from typing import Optional, Tuple, Dict, Any, List, Deque
+from collections import deque, defaultdict
+
+from flask import (
+    Flask, render_template, url_for, request, session, flash, redirect,
+    send_file, abort
+)
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import smtplib
+
+import pymysql
+import pandas as pd
+import numpy as np
+import cv2
+from PIL import Image
+
+# -------------------------
+# Configuration
+# -------------------------
+
+class Config:
+    # Flask
+    SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-change-me")
+
+    # Database
+    DB_HOST = os.environ.get("DB_HOST", "127.0.0.1")
+    DB_PORT = int(os.environ.get("DB_PORT", "3306"))
+    DB_USER = os.environ.get("DB_USER", "root")
+    DB_PASS = os.environ.get("DB_PASS", "Likhith@24")
+    DB_NAME = os.environ.get("DB_NAME", "smart_voting_system")
+
+    # Mail (for OTP)
+    MAIL_USER = os.environ.get("MAIL_USER", "likhithreddygg@gmail.com")
+    MAIL_PASS = os.environ.get("MAIL_PASS", "rlvtgzdrsbhlubjz")
+
+    # SMS (Fast2SMS)
+    FAST2SMS_API_KEY = os.environ.get("FAST2SMS_API_KEY", "")
+
+    # Face recognition
+    MIN_IMAGES_PER_LABEL = int(os.environ.get("MIN_IMAGES_PER_LABEL", "15"))
+    # Relaxed defaults for easier capture
+    BLUR_THRESHOLD = float(os.environ.get("BLUR_THRESHOLD", "60.0"))  # was 80.0
+    MIN_FACE_SIZE = int(os.environ.get("MIN_FACE_SIZE", "70"))        # was 80
+
+    # Voting capture limits
+    VOTING_MAX_SECONDS = int(os.environ.get("VOTING_MAX_SECONDS", "15"))
+    VOTING_MAX_FRAMES = int(os.environ.get("VOTING_MAX_FRAMES", "500"))
+
+    # Voting recognition tuning
+    LBPH_CONF_THRESHOLD = float(os.environ.get("LBPH_CONF_THRESHOLD", "80"))  # not used directly now
+    VOTING_MIN_FACE_SIZE = int(os.environ.get("VOTING_MIN_FACE_SIZE", os.environ.get("MIN_FACE_SIZE", "70")))
+    VOTING_SCALE_FACTOR = float(os.environ.get("VOTING_SCALE_FACTOR", "1.1"))
+    VOTING_MIN_NEIGHBORS = int(os.environ.get("VOTING_MIN_NEIGHBORS", "4"))
+    ROI_SIZE = int(os.environ.get("ROI_SIZE", "200"))  # normalize face ROI to this square size
+
+    # New strict voting parameters
+    VOTING_STRICT_CONF_THRESHOLD = float(os.environ.get("VOTING_STRICT_CONF_THRESHOLD", "60.0"))
+    VOTING_REQUIRED_CONSEC_MATCHES = int(os.environ.get("VOTING_REQUIRED_CONSEC_MATCHES", "7"))
+
+    # OTP
+    OTP_EXPIRY_SECONDS = int(os.environ.get("OTP_EXPIRY_SECONDS", "300"))  # 5 minutes
+    OTP_RESEND_MIN_INTERVAL = int(os.environ.get("OTP_RESEND_MIN_INTERVAL", "60"))  # 60s
+
+    # Admin IP allowlist (comma-separated), optional
+    ADMIN_IP_ALLOWLIST = os.environ.get("ADMIN_IP_ALLOWLIST", "")
+
+    # Capture strictness (relaxed)
+    CAPTURE_STABLE_CONSEC_FRAMES = int(os.environ.get("CAPTURE_STABLE_CONSEC_FRAMES", "8"))   # was 15
+    CAPTURE_MIN_FACE_RATIO = float(os.environ.get("CAPTURE_MIN_FACE_RATIO", "0.30"))          # was 0.40
+    CAPTURE_CENTER_TOLERANCE = float(os.environ.get("CAPTURE_CENTER_TOLERANCE", "0.25"))      # was 0.15
+    CAPTURE_LBPH_CONF_THRESHOLD = float(os.environ.get("CAPTURE_LBPH_CONF_THRESHOLD", "30.0"))  # lowered to reduce false positives
+
+config = Config()
+
+# -------------------------
+# App & Logging
+# -------------------------
+
+app = Flask(__name__)
+app.debug = True
+app.config['SECRET_KEY'] = config.SECRET_KEY
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("smart_voting")
+
+# -------------------------
+# Security: secret checks (only enforce in non-debug)
+# -------------------------
+
+def _require_secrets_in_production():
+    if app.debug:
+        return
+    missing = []
+    if not os.environ.get("SECRET_KEY") or os.environ.get("SECRET_KEY") == "dev-secret-key-change-me":
+        missing.append("SECRET_KEY")
+    if not os.environ.get("DB_PASS") or os.environ.get("DB_PASS") == "Likhith@24":
+        missing.append("DB_PASS")
+    if not os.environ.get("MAIL_USER") or not os.environ.get("MAIL_PASS"):
+        logger.warning("MAIL_USER/MAIL_PASS not set. OTP emails will fail in production.")
+    if missing:
+        raise RuntimeError(f"Missing/unsafe secrets in production: {', '.join(missing)}")
+
+# -------------------------
+# Database
+# -------------------------
+
+def get_db_connection():
+    return pymysql.connect(
+        host=config.DB_HOST,
+        user=config.DB_USER,
+        password=config.DB_PASS,
+        port=config.DB_PORT,
+        database=config.DB_NAME,
+        autocommit=False,
+        cursorclass=pymysql.cursors.Cursor
+    )
+
+def ensure_db_connection():
+    global mydb
+    try:
+        mydb.ping(reconnect=True)
+    except Exception:
+        try:
+            mydb.close()
+        except Exception:
+            pass
+        mydb = get_db_connection()
+
+# Keep a global connection for pandas read_sql_query compatibility
+mydb = get_db_connection()
+
+# -------------------------
+# OpenCV & Face models
+# -------------------------
+
+facedata = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+cascade = cv2.CascadeClassifier(facedata)
+
+# In-memory caches
+_recognizer_cache: Optional['cv2.face_LBPHFaceRecognizer'] = None  # type: ignore
+_encoder_cache: Optional[Any] = None
+_model_mtime: Optional[float] = None
+_encoder_mtime: Optional[float] = None
+
+def has_cv2_face() -> bool:
+    return hasattr(cv2, "face") and hasattr(cv2.face, "LBPHFaceRecognizer_create")
+
+def _file_mtime(path: str) -> Optional[float]:
+    try:
+        return os.path.getmtime(path)
+    except Exception:
+        return None
+
+def load_encoder(force: bool = False):
+    global _encoder_cache, _encoder_mtime
+    path = "encoder.pkl"
+    mtime = _file_mtime(path)
+    if _encoder_cache is None or force or (_encoder_mtime is None or (mtime and mtime != _encoder_mtime)):
+        if not os.path.exists(path):
+            _encoder_cache = None
+            _encoder_mtime = None
+            return None
+        with open(path, "rb") as f:
+            _encoder_cache = pickle.load(f)
+        _encoder_mtime = mtime
+        logger.info("Encoder loaded. Classes: %s", list(getattr(_encoder_cache, "classes_", [])))
+    return _encoder_cache
+
+def load_recognizer(force: bool = False):
+    global _recognizer_cache, _model_mtime
+    path = "Trained.yml"
+    mtime = _file_mtime(path)
+    if _recognizer_cache is None or force or (_model_mtime is None or (mtime and mtime != _model_mtime)):
+        if not has_cv2_face():
+            return None
+        if not os.path.exists(path):
+            _recognizer_cache = None
+            _model_mtime = None
+            return None
+        rec = cv2.face.LBPHFaceRecognizer_create()
+        rec.read(path)
+        _recognizer_cache = rec
+        _model_mtime = mtime
+        logger.info("Recognizer loaded from %s", path)
+    return _recognizer_cache
+
+# -------------------------
+# Recognition Observability
+# -------------------------
+
+RECENT_ATTEMPTS: Deque[Dict[str, Any]] = deque(maxlen=500)
+
+def record_attempt(conf: Optional[float], accepted: bool, label: Optional[int]):
+    RECENT_ATTEMPTS.append({
+        "ts": time.time(),
+        "conf": conf,
+        "accepted": accepted,
+        "label": label
+    })
+
+def summarize_attempts() -> Dict[str, Any]:
+    total = len(RECENT_ATTEMPTS)
+    accepted = sum(1 for a in RECENT_ATTEMPTS if a["accepted"])
+    confs = [a["conf"] for a in RECENT_ATTEMPTS if a["conf"] is not None]
+    per_label = defaultdict(int)
+    for a in RECENT_ATTEMPTS:
+        if a["label"] is not None:
+            per_label[a["label"]] += 1
+    return {
+        "total": total,
+        "accepted": accepted,
+        "accept_rate": (accepted / total * 100.0) if total else 0.0,
+        "conf_min": min(confs) if confs else None,
+        "conf_max": max(confs) if confs else None,
+        "conf_avg": (sum(confs) / len(confs)) if confs else None,
+        "per_label_counts": dict(per_label)
+    }
+
+# -------------------------
+# Helpers
+# -------------------------
+
+def try_open_camera() -> Optional[cv2.VideoCapture]:
+    attempts = [
+        (0, cv2.CAP_AVFOUNDATION),
+        (0, 0),
+        (1, 0),
+    ]
+    for idx, backend in attempts:
+        try:
+            cam = cv2.VideoCapture(idx, backend)
+            if cam and cam.isOpened():
+                return cam
+            if cam:
+                cam.release()
+        except Exception:
+            continue
+    return None
+
+def is_blurry(img_gray: np.ndarray) -> bool:
+    fm = cv2.Laplacian(img_gray, cv2.CV_64F).var()
+    return fm < config.BLUR_THRESHOLD
+
+def valid_email(email: str) -> bool:
+    return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email.strip()))
+
+def valid_phone(pno: str) -> bool:
+    digits = re.sub(r"\D", "", pno)
+    return 8 <= len(digits) <= 15
+
+def send_otp_email(to_address: str, otp_code: str) -> bool:
+    try:
+        message = MIMEMultipart()
+        message['From'] = config.MAIL_USER
+        message['To'] = to_address
+        message['Subject'] = "Your OTP Code for Smart Voting"
+        body = f"Your OTP is: {otp_code}\nThis code will expire in {config.OTP_EXPIRY_SECONDS // 60} minutes."
+        message.attach(MIMEText(body, 'plain'))
+        smtp = smtplib.SMTP('smtp.gmail.com', 587)
+        smtp.starttls()
+        smtp.login(config.MAIL_USER, config.MAIL_PASS)
+        smtp.sendmail(config.MAIL_USER, to_address, message.as_string())
+        smtp.quit()
+        logger.info("OTP sent to %s", to_address)
+        return True
+    except Exception as e:
+        logger.exception("Failed to send OTP email: %s", e)
+        return False
+
+def _client_ip_allowed() -> bool:
+    if not config.ADMIN_IP_ALLOWLIST.strip():
+        return True
+    allowed = {ip.strip() for ip in config.ADMIN_IP_ALLOWLIST.split(",") if ip.strip()}
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "")
+    client_ip = client_ip.split(",")[0].strip()
+    return client_ip in allowed
+
+def _require_admin():
+    return bool(session.get('IsAdmin')) and _client_ip_allowed() and app.debug
+
+# -------------------------
+# Session defaults
+# -------------------------
+
+@app.before_request
+def ensure_session_defaults():
+    if 'IsAdmin' not in session:
+        session['IsAdmin'] = False
+    if 'User' not in session:
+        session['User'] = None
+    try:
+        ensure_db_connection()
+    except Exception as e:
+        logger.warning("DB reconnect failed: %s", e)
+
+# -------------------------
+# Health/Ready
+# -------------------------
+
+@app.route('/health')
+def health():
+    return {"status": "ok", "time": time.time()}
+
+@app.route('/ready')
+def ready():
+    db_ok = True
+    try:
+        ensure_db_connection()
+        with mydb.cursor() as cur:
+            cur.execute("SELECT 1")
+    except Exception:
+        db_ok = False
+    model_ok = os.path.exists("Trained.yml")
+    encoder_ok = os.path.exists("encoder.pkl")
+    return {
+        "db": db_ok,
+        "model": model_ok,
+        "encoder": encoder_ok,
+        "has_cv2_face": has_cv2_face(),
+    }, (200 if (db_ok and has_cv2_face()) else 503)
+
+# -------------------------
+# Routes
+# -------------------------
+
+@app.route('/')
+@app.route('/home')
+def home():
+    return render_template('index.html')
+
+@app.route('/admin', methods=['POST', 'GET'])
+def admin():
+    if request.method == 'POST':
+        email = request.form.get('email', '').strip()
+        password = request.form.get('password', '').strip()
+        if (email == 'admin@voting.com') and (password == 'admin'):
+            session['IsAdmin'] = True
+            session['User'] = 'admin'
+            flash('Admin login successful', 'success')
+            logger.info("Admin logged in.")
+        else:
+            flash('Invalid admin credentials', 'danger')
+    return render_template('admin.html', admin=session.get('IsAdmin', False))
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    flash('Logged out successfully', 'success')
+    return redirect(url_for('home'))
+
+@app.route('/add_nominee', methods=['POST', 'GET'])
+def add_nominee():
+    if request.method == 'POST':
+        member = request.form.get('name', '').strip()
+        party = request.form.get('party', '').strip()
+        predefined_symbol = request.form.get('predefined_symbol', '')
+        
+        logo_filename = ""
+
+        # Handle Image Logic
+        if predefined_symbol and predefined_symbol != 'custom':
+            logo_filename = predefined_symbol
+        else:
+            # Handle File Upload
+            if 'image' not in request.files:
+                flash('No file part', 'danger')
+                return redirect(request.url)
+            file = request.files['image']
+            if file.filename == '':
+                flash('No selected file', 'danger')
+                return redirect(request.url)
+            if file:
+                filename = secure_filename(file.filename)
+                # Ensure unique filename to prevent overwrites
+                import uuid
+                unique_filename = f"{uuid.uuid4().hex[:8]}_{filename}"
+                file.save(os.path.join('static/img', unique_filename))
+                logo_filename = unique_filename
+
+        nominee = pd.read_sql_query('SELECT * FROM nominee', mydb)
+        all_members = set(nominee.member_name.astype(str).str.strip().values) if not nominee.empty else set()
+        all_parties = set(nominee.party_name.astype(str).str.strip().values) if not nominee.empty else set()
+        
+        if not member or not party or not logo_filename:
+            flash('All fields are required', 'warning')
+        elif member in all_members:
+            flash('The member already exists', 'info')
+        elif party in all_parties:
+            flash('The party already exists', 'info')
+        else:
+            sql = "INSERT INTO nominee (member_name, party_name, symbol_name) VALUES (%s, %s, %s)"
+            with mydb.cursor() as cur:
+                cur.execute(sql, (member, party, logo_filename))
+            mydb.commit()
+            flash('Successfully registered a new nominee', 'success')
+            logger.info("Nominee added: %s, %s, %s", member, party, logo_filename)
+            
+    return render_template('nominee.html', admin=session.get('IsAdmin', False))
+
+@app.route('/registration', methods=['POST', 'GET'])
+def registration():
+    if request.method == 'POST':
+        first_name = request.form.get('first_name', '').strip()
+        middle_name = request.form.get('middle_name', '').strip()
+        last_name = request.form.get('last_name', '').strip()
+        aadhar_id = request.form.get('aadhar_id', '').strip()
+        voter_id = request.form.get('voter_id', '').strip()
+        state = request.form.get('state', '').strip()
+        d_name = request.form.get('d_name', '').strip()
+        pno = request.form.get('pno', '').strip()
+        email = request.form.get('email', '').strip()
+        age_str = request.form.get('age', '').strip()
+
+        try:
+            age = int(age_str)
+        except Exception:
+            age = 0
+
+        if age < 18 or age > 120:
+            flash("Age must be between 18 and 120", "warning")
+            return render_template('voter_reg.html')
+
+        if not valid_email(email):
+            flash("Please enter a valid email address", "warning")
+            return render_template('voter_reg.html')
+
+        if not valid_phone(pno):
+            flash("Please enter a valid phone number", "warning")
+            return render_template('voter_reg.html')
+
+        voters = pd.read_sql_query('SELECT aadhar_id, voter_id FROM voters', mydb)
+        all_aadhar_ids = set(voters.aadhar_id.astype(str).str.strip().values) if not voters.empty else set()
+        all_voter_ids = set(voters.voter_id.astype(str).str.strip().values) if not voters.empty else set()
+
+        if (aadhar_id in all_aadhar_ids) or (voter_id in all_voter_ids):
+            flash('Already Registered as a Voter', 'info')
+        else:
+            sql = ('INSERT INTO voters (first_name, middle_name, last_name, aadhar_id, voter_id, email, pno, state, d_name, verified) '
+                   'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)')
+            with mydb.cursor() as cur:
+                cur.execute(sql, (first_name, middle_name, last_name, aadhar_id, voter_id, email, pno, state, d_name, 'no'))
+            mydb.commit()
+            session['aadhar'] = aadhar_id
+            session['status'] = 'no'
+            session['email'] = email
+            flash("Registration submitted. Please verify your email.", "success")
+            logger.info("Voter registered: %s", aadhar_id)
+            return redirect(url_for('verify'))
+    return render_template('voter_reg.html')
+
+@app.route('/verify', methods=['POST', 'GET'])
+def verify():
+    if session.get('status') == 'no':
+        if request.method == 'POST':
+            otp_check = request.form.get('otp_check', '').strip()
+            otp_stored = session.get('otp')
+            otp_expiry = session.get('otp_expiry', 0)
+            now = int(time.time())
+            if not otp_stored or now > otp_expiry:
+                flash("OTP expired. Please request a new one.", "warning")
+                return redirect(url_for('verify'))
+            if otp_check == otp_stored:
+                session['status'] = 'yes'
+                sql = "UPDATE voters SET verified=%s WHERE aadhar_id=%s"
+                with mydb.cursor() as cur:
+                    cur.execute(sql, (session['status'], session['aadhar']))
+                mydb.commit()
+                flash("Email verified successfully", 'success')
+                logger.info("Email verified for aadhar: %s", session.get('aadhar'))
+                # Decide next step based on session flag
+                next_step = session.pop('post_verify_next', None)
+                if next_step == 'voting':
+                    flash("Email verified. Continue to voting.", "success")
+                    return redirect(url_for('voting'))
+                # default: training flow
+                return redirect(url_for('capture_images'))
+            else:
+                flash("Wrong OTP. Please try again.", "warning")
+                return redirect(url_for('verify'))
+        else:
+            now = int(time.time())
+            last_sent = session.get('otp_last_sent', 0)
+            if now - last_sent < config.OTP_RESEND_MIN_INTERVAL:
+                wait = config.OTP_RESEND_MIN_INTERVAL - (now - last_sent)
+                flash(f"Please wait {wait}s before requesting another OTP.", "info")
+                return render_template('verify.html')
+
+            receiver_address = session.get('email')
+            if not receiver_address:
+                flash("Missing email in session. Please re-register.", "danger")
+                return redirect(url_for('registration'))
+
+            otp_code = str(np.random.randint(100000, 999999))
+            if send_otp_email(receiver_address, otp_code):
+                session['otp'] = otp_code
+                session['otp_expiry'] = now + config.OTP_EXPIRY_SECONDS
+                session['otp_last_sent'] = now
+                flash("OTP sent to your email.", "info")
+            else:
+                flash("Failed to send OTP. Please try again later.", "danger")
+    else:
+        flash("Your email is already verified", 'warning')
+    return render_template('verify.html')
+
+@app.route('/capture_images', methods=['POST', 'GET'])
+def capture_images():
+    # Guard: require logged-in aadhar and verified email before allowing capture
+    if not session.get('aadhar'):
+        flash("Please register/login first to capture images.", "warning")
+        return redirect(url_for('registration'))
+    if session.get('status') != 'yes':
+        flash("Please verify your email before capturing images.", "warning")
+        return redirect(url_for('verify'))
+
+    def face_centered_and_large(frame_w: int, frame_h: int, x: int, y: int, w: int, h: int) -> bool:
+        min_dim = min(frame_w, frame_h)
+        size_ok = (w >= config.CAPTURE_MIN_FACE_RATIO * min_dim) and (h >= config.CAPTURE_MIN_FACE_RATIO * min_dim)
+        cx_face = x + w / 2.0
+        cy_face = y + h / 2.0
+        cx_img = frame_w / 2.0
+        cy_img = frame_h / 2.0
+        tol_x = config.CAPTURE_CENTER_TOLERANCE * frame_w
+        tol_y = config.CAPTURE_CENTER_TOLERANCE * frame_h
+        center_ok = (abs(cx_face - cx_img) <= tol_x) and (abs(cy_face - cy_img) <= tol_y)
+        return size_ok and center_ok
+
+    if request.method == 'POST':
+        aadhar = session.get('aadhar')
+        if not aadhar:
+            flash("Session expired. Please register again.", "warning")
+            return redirect(url_for('registration'))
+
+        cam = try_open_camera()
+        if not cam:
+            flash("Unable to access camera. Check device index and permissions.", "warning")
+            return redirect(url_for('home'))
+
+        sampleNum = 0
+        path_to_store = os.path.join(os.getcwd(), "all_images", aadhar)
+        try:
+            shutil.rmtree(path_to_store)
+        except Exception:
+            pass
+        os.makedirs(path_to_store, exist_ok=True)
+
+        encoder = load_encoder()
+        recognizer = load_recognizer()
+
+        expected_label_id: Optional[int] = None
+        expected_known_to_model = False
+        classes: List[str] = []
+        if encoder is not None:
+            try:
+                classes = list(getattr(encoder, "classes_", []))
+                if aadhar in classes:
+                    expected_known_to_model = True
+                    expected_label_id = int(np.where(np.array(classes) == aadhar)[0][0])
+            except Exception as e:
+                if app.debug:
+                    logger.warning("Error mapping expected aadhar to label id: %s", e)
+
+        start_time = time.time()
+        timeout = 25  # slightly longer
+        stable_counter = 0
+        last_match_ok = False
+
+        reasons = {
+            "no_face": 0,
+            "too_small": 0,
+            "blurry": 0,
+            "not_centered_or_small_ratio": 0,
+            "identity_mismatch": 0,
+            "predict_error": 0
+        }
+
+        logger.info("Capture started for aadhar=%s, expected_known_to_model=%s, thresholds: min_face=%d, blur=%.1f, ratio=%.2f, center_tol=%.2f, stable=%d, lbph_cap_thr=%.1f",
+                    aadhar, expected_known_to_model, config.MIN_FACE_SIZE, config.BLUR_THRESHOLD, config.CAPTURE_MIN_FACE_RATIO,
+                    config.CAPTURE_CENTER_TOLERANCE, config.CAPTURE_STABLE_CONSEC_FRAMES, config.CAPTURE_LBPH_CONF_THRESHOLD)
+
+        duplicate_face_counter = 0  # Counter for consecutive duplicate detections
+
+        while True:
+            ret, img = cam.read()
+            if not ret:
+                continue
+            try:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            except Exception:
+                continue
+
+            frame_h, frame_w = gray.shape[:2]
+            faces = cascade.detectMultiScale(gray, 1.3, 5)
+            current_ok = False
+
+            if len(faces) == 0:
+                reasons["no_face"] += 1
+                duplicate_face_counter = 0 # Reset if no face
+
+            for (x, y, w, h) in faces:
+                if w < config.MIN_FACE_SIZE or h < config.MIN_FACE_SIZE:
+                    reasons["too_small"] += 1
+                    if app.debug:
+                        logger.debug("Reject: too_small w=%d h=%d (min=%d)", w, h, config.MIN_FACE_SIZE)
+                    continue
+                roi = gray[y:y + h, x:x + w]
+                if is_blurry(roi):
+                    reasons["blurry"] += 1
+                    if app.debug:
+                        logger.debug("Reject: blurry varLap=%.2f thr=%.2f", cv2.Laplacian(roi, cv2.CV_64F).var(), config.BLUR_THRESHOLD)
+                    continue
+                if not face_centered_and_large(frame_w, frame_h, x, y, w, h):
+                    reasons["not_centered_or_small_ratio"] += 1
+                    if app.debug:
+                        min_dim = min(frame_w, frame_h)
+                        ratio_w = w / float(min_dim)
+                        ratio_h = h / float(min_dim)
+                        logger.debug("Reject: not centered/ratio w=%.2f h=%.2f center_tol=%.2f", ratio_w, ratio_h, config.CAPTURE_CENTER_TOLERANCE)
+                    continue
+
+                # Check for duplicate face (face exists but belongs to someone else)
+                duplicate_detected_this_frame = False
+                if recognizer is not None and encoder is not None:
+                    try:
+                        roi_resized = cv2.resize(roi, (config.ROI_SIZE, config.ROI_SIZE))
+                        pred_id, conf = recognizer.predict(roi_resized)
+                        
+                        # If confidence is high (low distance)
+                        if conf < config.CAPTURE_LBPH_CONF_THRESHOLD:
+                            predicted_aadhar = encoder.classes_[pred_id]
+                            
+                            # If the predicted person is NOT the current user
+                            if predicted_aadhar != aadhar:
+                                # Check if this predicted aadhar actually exists in the DB
+                                is_active_voter = False
+                                try:
+                                    with mydb.cursor() as cur:
+                                        cur.execute("SELECT 1 FROM voters WHERE aadhar_id = %s", (predicted_aadhar,))
+                                        if cur.fetchone():
+                                            is_active_voter = True
+                                except Exception:
+                                    pass
+
+                                if is_active_voter:
+                                    duplicate_detected_this_frame = True
+                                    duplicate_face_counter += 1
+                                    logger.warning("Duplicate face detected frame %d! Predicted: %s", duplicate_face_counter, predicted_aadhar)
+                                    
+                                    if duplicate_face_counter >= 10: # Require 10 consecutive frames
+                                        logger.warning("Duplicate face CONFIRMED! Predicted: %s, Current: %s, Conf: %.2f", predicted_aadhar, aadhar, conf)
+                                        cam.release()
+                                        
+                                        # Rollback: Delete the current voter registration
+                                        try:
+                                            with mydb.cursor() as cur:
+                                                cur.execute("DELETE FROM voters WHERE aadhar_id = %s", (aadhar,))
+                                            mydb.commit()
+                                            logger.info("Rolled back registration for duplicate face aadhar: %s", aadhar)
+                                        except Exception as e:
+                                            logger.error("Failed to rollback registration: %s", e)
+                                        
+                                        # Clear session
+                                        session.pop('aadhar', None)
+                                        session.pop('status', None)
+                                        session.pop('email', None)
+                                        
+                                        flash(f"Registration Cancelled: Face already registered with Aadhar ID: {predicted_aadhar}", "danger")
+                                        return redirect(url_for('home'))
+                                else:
+                                    # Ghost face (in model but not in DB) - Ignore and continue
+                                    if app.debug:
+                                        logger.debug("Ignored ghost face match: %s (not in DB)", predicted_aadhar)
+                    except cv2.error:
+                        pass
+                
+                if not duplicate_detected_this_frame:
+                    duplicate_face_counter = 0 # Reset if not detected in this frame
+
+                # Identity enforcement only if the expected aadhar is already in the model
+                if recognizer is not None and encoder is not None and expected_known_to_model and expected_label_id is not None:
+                    try:
+                        roi_resized = cv2.resize(roi, (config.ROI_SIZE, config.ROI_SIZE))
+                        pred_id, conf = recognizer.predict(roi_resized)
+                        if app.debug:
+                            logger.debug("Predict (known): pred=%s conf=%.2f exp=%s thr=%.1f", str(pred_id), conf, str(expected_label_id), config.CAPTURE_LBPH_CONF_THRESHOLD)
+                        if pred_id == expected_label_id and conf < config.CAPTURE_LBPH_CONF_THRESHOLD:
+                            current_ok = True
+                        else:
+                            reasons["identity_mismatch"] += 1
+                            current_ok = False
+                    except cv2.error as e:
+                        reasons["predict_error"] += 1
+                        if app.debug:
+                            logger.warning("capture predict error: %s", e)
+                        current_ok = False
+                else:
+                    # Do not reject based on identity when expected aadhar is not yet in the model.
+                    current_ok = True
+
+                if current_ok:
+                    break
+
+            # Stability logic
+            if current_ok:
+                if last_match_ok:
+                    stable_counter += 1
+                else:
+                    stable_counter = 1
+                last_match_ok = True
+                if app.debug:
+                    logger.debug("Stable OK frames: %d / required %d", stable_counter, config.CAPTURE_STABLE_CONSEC_FRAMES)
+            else:
+                if last_match_ok and app.debug:
+                    logger.debug("Stability reset")
+                stable_counter = 0
+                last_match_ok = False
+
+            # Save after sufficient stability
+            if stable_counter >= config.CAPTURE_STABLE_CONSEC_FRAMES and current_ok:
+                saved_this_round = 0
+                for (x, y, w, h) in faces:
+                    if w < config.MIN_FACE_SIZE or h < config.MIN_FACE_SIZE:
+                        continue
+                    roi = gray[y:y + h, x:x + w]
+                    if is_blurry(roi):
+                        continue
+                    if not face_centered_and_large(frame_w, frame_h, x, y, w, h):
+                        continue
+                    # Re-check identity only if expected aadhar is known in model
+                    if recognizer is not None and encoder is not None and expected_known_to_model and expected_label_id is not None:
+                        try:
+                            roi_resized = cv2.resize(roi, (config.ROI_SIZE, config.ROI_SIZE))
+                            pred_id, conf = recognizer.predict(roi_resized)
+                            if not (pred_id == expected_label_id and conf < config.CAPTURE_LBPH_CONF_THRESHOLD):
+                                continue
+                        except cv2.error:
+                            continue
+
+                    sampleNum += 1
+                    saved_this_round += 1
+                    cv2.imwrite(os.path.join(path_to_store, f"{sampleNum}.jpg"), roi)
+
+                if app.debug:
+                    logger.info("Saved %d images this round (total=%d).", saved_this_round, sampleNum)
+                stable_counter = max(0, config.CAPTURE_STABLE_CONSEC_FRAMES // 2)
+
+            if sampleNum >= 200 or (time.time() - start_time) > timeout:
+                break
+
+        cam.release()
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+
+        logger.info("Capture finished for aadhar=%s. Saved=%d. Reasons summary: %s", aadhar, sampleNum, reasons)
+
+        if sampleNum == 0:
+            flash("No valid images captured for the intended voter. Please try again.", "warning")
+            return redirect(url_for('capture_images'))
+
+        flash("Face images captured successfully.", "success")
+        return redirect(url_for('home'))
+    return render_template('capture.html')
+
+from sklearn.preprocessing import LabelEncoder
+le = LabelEncoder()
+
+def getImagesAndLabels(path: str) -> Tuple[List[np.ndarray], List[int]]:
+    if not os.path.isdir(path):
+        return [], []
+
+    person_dirs = [os.path.join(path, f) for f in os.listdir(path) if os.path.isdir(os.path.join(path, f))]
+    faces: List[np.ndarray] = []
+    labels: List[str] = []
+
+    for folder in person_dirs:
+        aadhar_id = os.path.basename(folder)
+        imagePaths = [os.path.join(folder, f) for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f))]
+        imagePaths = [p for p in imagePaths if os.path.splitext(p)[1].lower() in ('.jpg', '.jpeg', '.png')]
+        for imagePath in imagePaths:
+            try:
+                pilImage = Image.open(imagePath).convert('L')
+                imageNp = np.array(pilImage, 'uint8')
+                if imageNp.shape[0] < config.MIN_FACE_SIZE or imageNp.shape[1] < config.MIN_FACE_SIZE:
+                    continue
+                if is_blurry(imageNp):
+                    continue
+                faces.append(imageNp)
+                labels.append(aadhar_id)
+            except Exception:
+                continue
+
+    if not labels:
+        return [], []
+
+    label_ids = le.fit_transform(labels).tolist()
+    with open('encoder.pkl', 'wb') as output:
+        pickle.dump(le, output)
+    return faces, label_ids
+
+@app.route('/train', methods=['POST', 'GET'])
+def train():
+    if request.method == 'POST':
+        if not has_cv2_face():
+            flash("OpenCV contrib (cv2.face) is not available. Install opencv-contrib-python.", "danger")
+            return redirect(url_for('home'))
+
+        faces, label_ids = getImagesAndLabels("all_images")
+        if len(faces) == 0:
+            flash("No images found to train. Please capture images first.", "warning")
+            return redirect(url_for('home'))
+
+        with open('encoder.pkl', 'rb') as f:
+            enc = pickle.load(f)
+        classes = list(getattr(enc, "classes_", []))
+        if len(classes) < 2:
+            flash("Training requires at least 2 different voters (labels).", "warning")
+            return redirect(url_for('home'))
+
+        counts = pd.Series(label_ids).value_counts()
+        if (counts < config.MIN_IMAGES_PER_LABEL).any():
+            flash(f"Each voter should have at least {config.MIN_IMAGES_PER_LABEL} good images. Please capture more.", "info")
+            return redirect(url_for('home'))
+
+        recognizer = cv2.face.LBPHFaceRecognizer_create()
+        recognizer.train(faces, np.array(label_ids))
+        recognizer.save("Trained.yml")
+        load_encoder(force=True)
+        load_recognizer(force=True)
+
+        flash("Model trained successfully.", 'success')
+        logger.info("Model trained. Faces: %d, Labels: %d", len(faces), len(set(label_ids)))
+        return redirect(url_for('home'))
+    return render_template('train.html')
+
+@app.route('/update')
+def update():
+    return render_template('update.html')
+
+@app.route('/updateback', methods=['POST', 'GET'])
+def updateback():
+    if request.method == 'POST':
+        first_name = request.form.get('first_name', '').strip()
+        middle_name = request.form.get('middle_name', '').strip()
+        last_name = request.form.get('last_name', '').strip()
+        aadhar_id = request.form.get('aadhar_id', '').strip()
+        voter_id = request.form.get('voter_id', '').strip()
+        email = request.form.get('email', '').strip()
+        pno = request.form.get('pno', '').strip()
+        age_str = request.form.get('age', '').strip()
+
+        try:
+            age = int(age_str)
+        except Exception:
+            age = 0
+
+        voters = pd.read_sql_query('SELECT aadhar_id FROM voters', mydb)
+        all_aadhar_ids = set(voters.aadhar_id.astype(str).str.strip().values) if not voters.empty else set()
+
+        if age < 18 or age > 120:
+            flash("Age must be between 18 and 120", "warning")
+        elif aadhar_id in all_aadhar_ids:
+            sql = ("UPDATE voters SET first_name=%s, middle_name=%s, last_name=%s, "
+                   "voter_id=%s, email=%s, pno=%s, verified=%s WHERE aadhar_id=%s")
+            with mydb.cursor() as cur:
+                cur.execute(sql, (first_name, middle_name, last_name, voter_id, email, pno, 'no', aadhar_id))
+            mydb.commit()
+            session['aadhar'] = aadhar_id
+            session['status'] = 'yes'
+            session['email'] = email
+            flash('Database updated successfully. Please re-verify email.', 'success')
+            logger.info("Voter updated: %s", aadhar_id)
+            return redirect(url_for('verify'))
+        else:
+            flash(f"Aadhar: {aadhar_id} doesn't exist in the database for update", 'warning')
+    return render_template('update.html')
+
+# NEW: Login with details (voter_id + aadhar_id + email) for voting
+@app.route('/login_details', methods=['GET', 'POST'])
+def login_details():
+    # Clear session on GET to ensure fresh login
+    if request.method == 'GET':
+        session.pop('aadhar', None)
+        session.pop('email', None)
+        session.pop('status', None)
+        session.pop('vote', None)
+        session.pop('select_aadhar', None)
+
+    if request.method == 'POST':
+        voter_id = request.form.get('voter_id', '').strip()
+        aadhar = request.form.get('aadhar_id', '').strip()
+        email = request.form.get('email', '').strip()
+
+        if not voter_id or not aadhar or not email:
+            flash("All fields are required.", "warning")
+            return render_template('login_details.html')
+
+        try:
+            # 1. Check if user exists by Aadhar first
+            df_aadhar = pd.read_sql_query('SELECT * FROM voters WHERE aadhar_id=%s LIMIT 1', mydb, params=[aadhar])
+            
+            if df_aadhar.empty:
+                flash("User not found. Please register first.", "danger")
+                return render_template('login_details.html')
+            
+            # 2. Check if details match
+            user_row = df_aadhar.iloc[0]
+            db_voter_id = str(user_row['voter_id']).strip()
+            db_email = str(user_row['email']).strip()
+            
+            if (db_voter_id != voter_id) or (db_email != email):
+                flash("Details do not match. Please check your Voter ID and Email.", "warning")
+                return render_template('login_details.html')
+
+            # 3. Check verification status - FORCE RE-VERIFICATION (2FA)
+            # verified = str(user_row['verified'] or '').lower()
+            # session['status'] = 'yes' if verified == 'yes' else 'no'
+            
+            # Set session
+            session['aadhar'] = str(user_row['aadhar_id'])
+            session['email'] = db_email
+            
+            # Always force 'no' to require OTP on every login
+            session['status'] = 'no' 
+            session['post_verify_next'] = 'voting'
+
+            # 4. Check if already voted
+            try:
+                df_exists = pd.read_sql_query('SELECT 1 FROM vote WHERE aadhar=%s LIMIT 1', mydb, params=[session['aadhar']])
+                if not df_exists.empty:
+                    return redirect(url_for('already_voted'))
+            except Exception as e:
+                logger.warning("Login duplicate check failed: %s", e)
+
+            flash("Details matched. Please verify your email to continue.", "info")
+            return redirect(url_for('verify'))
+
+        except Exception as e:
+            logger.warning("Login by details failed: %s", e)
+            flash("Error while verifying details. Try again.", "danger")
+            return render_template('login_details.html')
+
+    return render_template('login_details.html')
+
+# Existing simple login by aadhar (kept for admin/testing if needed)
+@app.route('/login_aadhar', methods=['GET', 'POST'])
+def login_aadhar():
+    if request.method == 'POST':
+        aadhar = request.form.get('aadhar', '').strip()
+        if not aadhar:
+            flash("Please enter your Aadhar ID.", "warning")
+            return redirect(url_for('login_aadhar'))
+        try:
+            df = pd.read_sql_query('SELECT aadhar_id, email, verified FROM voters WHERE aadhar_id=%s LIMIT 1', mydb, params=[aadhar])
+            if df.empty:
+                flash("Aadhar not found. Please register first.", "warning")
+                return redirect(url_for('login_aadhar'))
+            # Set session from DB
+            session['aadhar'] = str(df.iloc[0]['aadhar_id'])
+            session['email'] = str(df.iloc[0]['email'])
+            verified = str(df.iloc[0]['verified'] or '').lower()
+            session['status'] = 'yes' if verified == 'yes' else 'no'
+
+            # If not verified, send to OTP first, then return to voting
+            if session['status'] != 'yes':
+                session['post_verify_next'] = 'voting'
+                flash("Please verify your email to continue to voting.", "info")
+                return redirect(url_for('verify'))
+
+            flash("Logged in with Aadhar successfully.", "success")
+            return redirect(url_for('voting'))
+        except Exception as e:
+            logger.warning("Login by aadhar failed: %s", e)
+            flash("Error while logging in. Try again.", "danger")
+            return redirect(url_for('login_aadhar'))
+    # Simple inline form (no template needed)
+    return """
+    <h2>Login by Aadhar</h2>
+    <form method="post">
+      <label>Aadhar ID:</label>
+      <input type="text" name="aadhar" />
+      <button type="submit">Login</button>
+    </form>
+    """
+
+@app.route('/voting', methods=['POST', 'GET'])
+def voting():
+    # If user lands here via GET and has no aadhar, guide them to the details form
+    if request.method == 'GET' and not session.get('aadhar'):
+        flash("Please enter your Voter ID, Aadhar ID, and Email to continue.", "info")
+        return redirect(url_for('login_details'))
+
+    if request.method == 'POST':
+        if not has_cv2_face():
+            flash("OpenCV contrib (cv2.face) is not available. Install opencv-contrib-python.", "danger")
+            return render_template('voting.html')
+
+        expected_aadhar = session.get('aadhar')
+        if not expected_aadhar:
+            flash("Please enter your Voter ID, Aadhar ID, and Email to continue.", "info")
+            return redirect(url_for('login_details'))
+
+        # If email not verified, send to verify and return here after success
+        if session.get('status') != 'yes':
+            session['post_verify_next'] = 'voting'
+            flash("Please verify your email to continue to voting.", "info")
+            return redirect(url_for('verify'))
+
+        try:
+            df_exists = pd.read_sql_query('SELECT 1 FROM vote WHERE aadhar=%s LIMIT 1', mydb, params=[expected_aadhar])
+            if not df_exists.empty:
+                # User already voted. Redirect to already_voted page.
+                return redirect(url_for('already_voted'))
+        except Exception as e:
+            logger.warning("Pre-voting duplicate check failed: %s", e)
+
+        encoder = load_encoder()
+        recognizer = load_recognizer()
+        if encoder is None or recognizer is None:
+            flash("Model not trained yet. Please train the model first.", "warning")
+            return render_template('voting.html')
+
+        try:
+            classes = list(getattr(encoder, "classes_", []))
+        except Exception:
+            classes = []
+        if expected_aadhar not in classes:
+            flash("Your face is not in the trained model. Please capture your images and retrain before voting.", "warning")
+            return render_template('voting.html')
+
+        expected_label_id = int(np.where(np.array(classes) == expected_aadhar)[0][0])
+
+        cam = try_open_camera()
+        if not cam:
+            flash("Unable to access camera. Check permissions and device index.", "warning")
+            return render_template('voting.html')
+
+        det_aadhar = None
+        start_time = time.time()
+        frames_seen = 0
+        consec_ok = 0
+
+        try:
+            while True:
+                ret, im = cam.read()
+                if not ret:
+                    continue
+
+                frames_seen += 1
+                if (time.time() - start_time) > config.VOTING_MAX_SECONDS or frames_seen >= config.VOTING_MAX_FRAMES:
+                    break
+
+                gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+                faces = cascade.detectMultiScale(
+                    gray,
+                    scaleFactor=config.VOTING_SCALE_FACTOR,
+                    minNeighbors=config.VOTING_MIN_NEIGHBORS
+                )
+                current_frame_ok = False
+                for (x, y, w, h) in faces:
+                    if w < config.VOTING_MIN_FACE_SIZE or h < config.VOTING_MIN_FACE_SIZE:
+                        continue
+                    try:
+                        roi = gray[y:y + h, x:x + w]
+                        roi_resized = cv2.resize(roi, (config.ROI_SIZE, config.ROI_SIZE))
+                        pred_id, conf = recognizer.predict(roi_resized)
+                        if app.debug:
+                            logger.info("Voting strict: conf=%.2f, pred=%s exp=%s", conf, str(pred_id), str(expected_label_id))
+                    except cv2.error as e:
+                        if app.debug:
+                            logger.warning("predict error: %s", e)
+                        record_attempt(None, False, None)
+                        continue
+
+                    if pred_id == expected_label_id and conf < config.VOTING_STRICT_CONF_THRESHOLD:
+                        current_frame_ok = True
+                        break
+
+                if current_frame_ok:
+                    consec_ok += 1
+                else:
+                    consec_ok = 0
+
+                record_attempt(conf if 'conf' in locals() else None, current_frame_ok, expected_label_id if current_frame_ok else None)
+
+                if consec_ok >= config.VOTING_REQUIRED_CONSEC_MATCHES:
+                    det_aadhar = expected_aadhar
+                    break
+        finally:
+            cam.release()
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
+
+        if det_aadhar:
+            # Post-recognition duplicate-vote check (A3): if already voted, show message and stop
+            try:
+                df_exists = pd.read_sql_query('SELECT 1 FROM vote WHERE aadhar=%s LIMIT 1', mydb, params=[det_aadhar])
+                if not df_exists.empty:
+                    flash("You already voted", "warning")
+                    return render_template('voting.html')
+            except Exception as e:
+                logger.warning("Post-recognition duplicate-vote check failed: %s", e)
+                # If the DB check fails, we proceed to candidate selection as before.
+
+            session['select_aadhar'] = det_aadhar
+            logger.info("Detected voter (strict): %s", det_aadhar)
+            return redirect(url_for('select_candidate'))
+        else:
+            if _require_admin():
+                flash("Unable to verify the expected voter. Admin can override below (debug only).", "warning")
+                session['override_allowed'] = True
+                return render_template('voting.html', admin_override=True)
+            flash("Unable to verify your identity for voting. Please contact help desk.", "info")
+            return render_template('voting.html')
+    return render_template('voting.html')
+
+@app.route('/voting/override', methods=['POST'])
+def voting_override():
+    if not _require_admin():
+        return "Unauthorized", 403
+    if not session.get('override_allowed'):
+        flash("No override context. Start voting first.", "warning")
+        return redirect(url_for('voting'))
+    aadhar = request.form.get('aadhar', '').strip()
+    if not aadhar:
+        flash("Aadhar is required to override.", "warning")
+        return redirect(url_for('voting'))
+    try:
+        df = pd.read_sql_query('SELECT aadhar_id FROM voters WHERE aadhar_id=%s', mydb, params=[aadhar])
+        if df.empty:
+            flash("Aadhar not found in voters.", "danger")
+            return redirect(url_for('voting'))
+    except Exception as e:
+        logger.warning("DB check error: %s", e)
+        flash("Error verifying aadhar.", "danger")
+        return redirect(url_for('voting'))
+    session['select_aadhar'] = aadhar
+    session.pop('override_allowed', None)
+    flash("Admin override accepted. Proceed to candidate selection.", "info")
+    return redirect(url_for('select_candidate'))
+
+@app.route('/select_candidate', methods=['POST', 'GET'])
+def select_candidate():
+    aadhar = session.get('select_aadhar')
+    if not aadhar:
+        flash("No detected voter found. Please try voting again.", "warning")
+        return redirect(url_for('voting'))
+
+    df_nom = pd.read_sql_query('SELECT * FROM nominee', mydb)
+    # We need full rows for the template (result) AND symbol names for validation (all_nom)
+    all_nom = df_nom['symbol_name'].values if not df_nom.empty else []
+    
+    if df_nom.empty:
+        flash("No nominees available yet. Please contact admin.", "info")
+        return redirect(url_for('home'))
+
+    g = pd.read_sql_query('SELECT aadhar FROM vote', mydb)
+    all_adhar = g['aadhar'].values if not g.empty else []
+    if aadhar in all_adhar:
+        flash("You already voted", "warning")
+        return redirect(url_for('home'))
+    else:
+        if request.method == 'POST':
+            # Template sends 'nominee'
+            vote = request.form.get('nominee')
+
+            # Defensive, authoritative check immediately before insert
+            try:
+                df_exists = pd.read_sql_query('SELECT 1 FROM vote WHERE aadhar=%s LIMIT 1', mydb, params=[aadhar])
+                if not df_exists.empty:
+                    flash("You already voted", "warning")
+                    logger.info("Duplicate vote prevented for aadhar: %s", aadhar)
+                    return redirect(url_for('home'))
+            except Exception as e:
+                logger.warning("Pre-insert duplicate check failed: %s", e)
+                # We continue; DB may still enforce uniqueness if configured.
+
+            if vote not in all_nom:
+                flash("Invalid candidate selected.", "danger")
+                return render_template('select_candidate.html', result=df_nom.values)
+            
+            session['vote'] = vote
+            sql = "INSERT INTO vote (vote, aadhar) VALUES (%s, %s)"
+            try:
+                with mydb.cursor() as cur:
+                    cur.execute(sql, (vote, aadhar))
+                mydb.commit()
+            except pymysql.err.IntegrityError as e:
+                # In case a unique index exists on aadhar, catch and inform the user.
+                logger.info("IntegrityError on vote insert for aadhar=%s: %s", aadhar, e)
+                flash("You already voted", "warning")
+                return redirect(url_for('home'))
+
+            if config.FAST2SMS_API_KEY:
+                try:
+                    s = "SELECT pno, first_name FROM voters WHERE aadhar_id=%s"
+                    c = pd.read_sql_query(s, mydb, params=[aadhar])
+                    pno = str(c.values[0][0])
+                    name = str(c.values[0][1])
+                    url = "https://www.fast2sms.com/dev/bulkV2"
+                    message = f"Dear {name}, your vote has been recorded. Thank you."
+                    data1 = {
+                        "route": "q",
+                        "message": message,
+                        "language": "english",
+                        "flash": 0,
+                        "numbers": pno,
+                    }
+                    headers = {
+                        "authorization": config.FAST2SMS_API_KEY,
+                        "Content-Type": "application/json"
+                    }
+                    import requests
+                    requests.post(url, headers=headers, json=data1, timeout=10)
+                except Exception as e:
+                    logger.warning("SMS send error: %s", e)
+
+            flash("Voted Successfully", 'success')
+            logger.info("Vote recorded for aadhar: %s, vote: %s", aadhar, vote)
+            
+            # CLEAR SESSION so the next user must login
+            session.pop('aadhar', None)
+            session.pop('email', None)
+            session.pop('status', None)
+            session.pop('vote', None)
+            session.pop('select_aadhar', None)
+            
+            return redirect(url_for('home'))
+    
+    # Pass df_nom.values as 'result' for the template loop
+    return render_template('select_candidate.html', result=df_nom.values)
+
+@app.route('/voting_res')
+def voting_res():
+    # Get all nominees
+    df_nom = pd.read_sql_query('SELECT * FROM nominee', mydb)
+    
+    # Get all votes
+    votes_df = pd.read_sql_query('SELECT * FROM vote', mydb)
+    
+    result = []
+    if not df_nom.empty:
+        # Calculate vote counts
+        vote_counts = {}
+        if not votes_df.empty:
+            vote_counts = votes_df['vote'].value_counts().to_dict()
+            
+        # Construct result list: [id, member_name, party_name, symbol_name, count]
+        # Iterate over df_nom rows
+        for index, row in df_nom.iterrows():
+            symbol = str(row['symbol_name'])
+            count = vote_counts.get(symbol, 0)
+            # Create a list matching the template's expected indices
+            # row[0]=id (unused in template), row[1]=name, row[2]=party, row[3]=symbol, row[4]=count
+            entry = [
+                row['id'], 
+                row['member_name'], 
+                row['party_name'], 
+                symbol, 
+                count
+            ]
+            result.append(entry)
+            
+    # Aggregate votes by party
+    party_data = {}
+    for entry in result:
+        party = entry[2] # party_name is at index 2
+        count = entry[4] # count is at index 4
+        party_data[party] = party_data.get(party, 0) + count
+    
+    # Convert to list and sort by votes descending
+    party_result = [[p, c] for p, c in party_data.items()]
+    party_result.sort(key=lambda x: x[1], reverse=True)
+            
+    return render_template('voting_res.html', result=result, party_result=party_result)
+
+@app.route('/already_voted')
+def already_voted():
+    return render_template('already_voted.html')
+
+# -------------------------
+# Admin-protected Debug/Inspection Routes
+# -------------------------
+
+@app.route('/admin/summary')
+def admin_summary():
+    if not _require_admin():
+        return "Unauthorized", 403
+    voters = pd.read_sql_query('SELECT COUNT(*) AS total, SUM(verified="yes") AS verified FROM voters', mydb)
+    nominees = pd.read_sql_query('SELECT COUNT(*) AS total FROM nominee', mydb)
+    votes = pd.read_sql_query('SELECT COUNT(*) AS total FROM vote', mydb)
+    voters_total = int(voters.iloc[0]['total'] or 0)
+    voters_verified = int(voters.iloc[0]['verified'] or 0)
+    nominees_total = int(nominees.iloc[0]['total'] or 0)
+    votes_total = int(votes.iloc[0]['total'] or 0)
+    html = f"""
+    <h2>Admin Summary</h2>
+    <ul>
+      <li>Total voters: {voters_total}</li>
+      <li>Verified voters: {voters_verified}</li>
+      <li>Total nominees: {nominees_total}</li>
+      <li>Total votes: {votes_total}</li>
+    </ul>
+    """
+    return html
+
+@app.route('/debug/db/voters')
+def debug_db_voters():
+    if not _require_admin():
+        return "Unauthorized", 403
+    df = pd.read_sql_query('SELECT * FROM voters ORDER BY aadhar_id DESC LIMIT 100', mydb)
+    return df.to_html(index=False)
+
+@app.route('/debug/db/nominees')
+def debug_db_nominees():
+    if not _require_admin():
+        return "Unauthorized", 403
+    df = pd.read_sql_query('SELECT * FROM nominee ORDER BY member_name ASC LIMIT 100', mydb)
+    return df.to_html(index=False)
+
+@app.route('/debug/db/votes')
+def debug_db_votes():
+    if not _require_admin():
+        return "Unauthorized", 403
+    df = pd.read_sql_query('SELECT * FROM vote ORDER BY id DESC LIMIT 100', mydb)
+    return df.to_html(index=False)
+
+@app.route('/debug/session')
+def debug_session():
+    if not _require_admin():
+        return "Unauthorized", 403
+    keys = ['IsAdmin','User','aadhar','status','email','select_aadhar','vote','otp','otp_expiry','otp_last_sent','override_allowed']
+    data = {k: session.get(k) for k in keys}
+    rows = "".join([f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in data.items()])
+    return f"<h2>Session</h2><table border='1'><tr><th>Key</th><th>Value</th></tr>{rows}</table>"
+
+@app.route('/debug/images/<aadhar>')
+def debug_images(aadhar):
+    if not _require_admin():
+        return "Unauthorized", 403
+    path = os.path.join(os.getcwd(), "all_images", aadhar)
+    if not os.path.isdir(path):
+        return f"No folder for {aadhar}", 404
+    files = [f for f in os.listdir(path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    files_sorted = sorted(files)
+    preview = "<br>".join(files_sorted[:200])
+    return f"<h2>Images for {aadhar}</h2><p>Total: {len(files_sorted)}</p><pre>{preview}</pre>"
+
+@app.route('/debug/encoder')
+def debug_encoder():
+    if not _require_admin():
+        return "Unauthorized", 403
+    try:
+        enc = load_encoder()
+        if enc is None:
+            return "<h2>Encoder</h2><p>encoder.pkl not found.</p>", 404
+        classes = list(getattr(enc, 'classes_', []))
+        return f"<h2>Encoder</h2><p>Classes ({len(classes)}):</p><pre>{classes}</pre>"
+    except Exception as e:
+        return f"<h2>Encoder</h2><p>Error: {e}</p>", 500
+
+@app.route('/debug/model')
+def debug_model():
+    if not _require_admin():
+        return "Unauthorized", 403
+    exists = os.path.exists("Trained.yml")
+    size = os.path.getsize("Trained.yml") if exists else 0
+    return f"<h2>Model</h2><p>Exists: {exists}</p><p>Size: {size} bytes</p>"
+
+@app.route('/debug/env')
+def debug_env():
+    if not _require_admin():
+        return "Unauthorized", 403
+    info = {
+        "cwd": os.getcwd(),
+        "opencv_version": getattr(cv2, '__version__', 'unknown'),
+        "has_cv2_face": has_cv2_face(),
+        "has_haarcascade": os.path.exists(facedata),
+        "lbph_conf_threshold": config.LBPH_CONF_THRESHOLD,
+        "voting_scale_factor": config.VOTING_SCALE_FACTOR,
+        "voting_min_neighbors": config.VOTING_MIN_NEIGHBORS,
+        "voting_min_face_size": config.VOTING_MIN_FACE_SIZE,
+        "roi_size": config.ROI_SIZE,
+        "voting_strict_conf_threshold": config.VOTING_STRICT_CONF_THRESHOLD,
+        "voting_required_consec_matches": config.VOTING_REQUIRED_CONSEC_MATCHES,
+    }
+    rows = "".join([f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in info.items()])
+    return f"<h2>Environment</h2><table border='1'><tr><th>Key</th><th>Value</th></tr>{rows}</table>"
+
+# -------------------------
+# Admin Stats and Export/Import
+# -------------------------
+
+@app.route('/admin/stats')
+def admin_stats():
+    if not _require_admin():
+        return "Unauthorized", 403
+    base = os.path.join(os.getcwd(), "all_images")
+    per_class_counts = {}
+    if os.path.isdir(base):
+        for name in sorted(os.listdir(base)):
+            p = os.path.join(base, name)
+            if os.path.isdir(p):
+                cnt = sum(1 for f in os.listdir(p) if f.lower().endswith(('.jpg','.jpeg','.png')))
+                per_class_counts[name] = cnt
+
+    sum_attempts = summarize_attempts()
+    rows = "".join([f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in sum_attempts.items() if k != "per_label_counts"])
+    per_label_rows = "".join([f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in sum_attempts.get("per_label_counts", {}).items()])
+    per_class_rows = "".join([f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in per_class_counts.items()])
+
+    html = f"""
+    <h2>Admin Stats</h2>
+    <h3>Recent Recognition Attempts (last {RECENT_ATTEMPTS.maxlen})</h3>
+    <table border='1'>
+      <tr><th>Metric</th><th>Value</th></tr>
+      {rows}
+    </table>
+    <h3>Attempts Per Predicted Label</h3>
+    <table border='1'>
+      <tr><th>Label</th><th>Count</th></tr>
+      {per_label_rows}
+    </table>
+    <h3>Training Samples Per Class</h3>
+    <table border='1'>
+      <tr><th>Aadhar</th><th>Images</th></tr>
+      {per_class_rows}
+    </table>
+    """
+    return html
+
+@app.route('/admin/export')
+def admin_export():
+    if not _require_admin():
+        return "Unauthorized", 403
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, mode='w', compression=zipfile.ZIP_DEFLATED) as z:
+        for fname in ["encoder.pkl", "Trained.yml"]:
+            if os.path.exists(fname):
+                z.write(fname, arcname=fname)
+        base = "all_images"
+        if os.path.isdir(base):
+            for root, _, files in os.walk(base):
+                for f in files:
+                    path = os.path.join(root, f)
+                    arc = os.path.relpath(path, ".")
+                    z.write(path, arcname=arc)
+    mem.seek(0)
+    return send_file(mem, mimetype='application/zip', as_attachment=True, download_name='voting_export.zip')
+
+@app.route('/admin/import', methods=['POST'])
+def admin_import():
+    if not _require_admin():
+        return "Unauthorized", 403
+    if 'file' not in request.files:
+        flash("No file uploaded.", "warning")
+        return redirect(url_for('admin_summary'))
+    f = request.files['file']
+    if not f.filename.lower().endswith(".zip"):
+        flash("Please upload a .zip file.", "warning")
+        return redirect(url_for('admin_summary'))
+    tmpdir = tempfile.mkdtemp(prefix="import_")
+    zpath = os.path.join(tmpdir, "import.zip")
+    f.save(zpath)
+    with zipfile.ZipFile(zpath, 'r') as z:
+        z.extractall(tmpdir)
+    for fname in ["encoder.pkl", "Trained.yml"]:
+        src = os.path.join(tmpdir, fname)
+        if os.path.exists(src):
+            shutil.move(src, os.path.join(os.getcwd(), fname))
+    src_images = os.path.join(tmpdir, "all_images")
+    dest_images = os.path.join(os.getcwd(), "all_images")
+    if os.path.isdir(src_images):
+        if os.path.isdir(dest_images):
+            shutil.rmtree(dest_images)
+        shutil.move(src_images, dest_images)
+    shutil.rmtree(tmpdir, ignore_errors=True)
+    load_encoder(force=True)
+    load_recognizer(force=True)
+    flash("Import completed.", "success")
+    return redirect(url_for('admin_summary'))
+
+# -------------------------
+# Run
+# -------------------------
+
+if __name__ == '__main__':
+    app.debug = True
+    try:
+        _require_secrets_in_production()
+    except Exception as e:
+        logger.error("Startup secret check failed: %s", e)
+        raise
+
+    if config.SECRET_KEY == "dev-secret-key-change-me":
+        logger.warning("Using default SECRET_KEY. Set SECRET_KEY env var for production.")
+    if config.DB_PASS == "Likhith@24":
+        logger.warning("Using default DB_PASS. Set DB_* env vars for production.")
+    if config.MAIL_USER == "ssrikar888@gmail.comß":
+        logger.warning("Configure MAIL_USER/MAIL_PASS for OTP emails.")
+
+    db_ok = True
+    try:
+        ensure_db_connection()
+        with mydb.cursor() as cur:
+            cur.execute("SELECT 1")
+    except Exception as e:
+        db_ok = False
+        logger.error("Database connectivity check failed: %s", e)
+        if not app.debug:
+            raise
+
+    if not has_cv2_face():
+        logger.error("OpenCV contrib (cv2.face) not available. Install opencv-contrib-python.")
+        if not app.debug:
+            raise SystemExit(1)
+
+    app.run(debug=True)

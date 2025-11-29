@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>Online Voting System - Cast Your Vote</title>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+
+    <link href="static/img/favicon.ico" rel="icon">
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700;800&display=swap"
+        rel="stylesheet">
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.10.0/css/all.min.css" rel="stylesheet">
+    <link href="static/lib/animate/animate.min.css" rel="stylesheet">
+    <link href="static/lib/owlcarousel/assets/owl.carousel.min.css" rel="stylesheet">
+    <link href="static/lib/lightbox/css/lightbox.min.css" rel="stylesheet">
+    <link href="static/css/style.css" rel="stylesheet">
+    <link href="static/css/theme.css" rel="stylesheet">
+    <style>
+        /* Styles moved to theme.css to ensure consistency */
+    </style>
+</head>
+
+<body>
+    <div class="navbar navbar-expand-lg navbar-dark" style="height: var(--navbar-h);">
+        <div class="container">
+            <a class="navbar-brand font-weight-bold text-white" href="{{ url_for('home') }}">
+                <i class="fas fa-vote-yea mr-2"></i>Smart Voting
+            </a>
+        </div>
+    </div>
+
+    <div class="hero">
+        <div class="container">
+            <div class="glass-card">
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                {% for category, message in messages %}
+                <div class="alert alert-{{ category }} mb-4">
+                    {{ message }}
+                </div>
+                {% endfor %}
+                {% endif %}
+                {% endwith %}
+
+                <h1 class="page-title">Select Your Candidate</h1>
+                <p class="subtitle">Vote wisely. Your vote is your voice.</p>
+
+                <div class="row mt-5">
+                    {% for row in result %}
+                    <div class="col-md-4 mb-4">
+                        <div class="candidate-card">
+                            <img src="static/img/{{ row[3] }}" class="candidate-img" alt="Symbol">
+                            <h3 class="candidate-name">{{ row[1] }}</h3>
+                            <p class="party-name">{{ row[2] }}</p>
+
+                            <form action="{{ url_for('select_candidate') }}" method="post" class="w-100 mt-auto">
+                                <input type="hidden" name="nominee" value="{{ row[3] }}">
+                                <button type="submit" class="btn btn-primary btn-block">
+                                    <i class="fas fa-check mr-2"></i> Vote
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/js/bootstrap.bundle.min.js"></script>
+    <script src="static/js/main.js"></script>
+</body>
+
+</html>

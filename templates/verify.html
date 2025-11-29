@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>Online Voting System - Email Verification</title>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+
+    <link href="static/img/favicon.ico" rel="icon">
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700;800&display=swap"
+        rel="stylesheet">
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.10.0/css/all.min.css" rel="stylesheet">
+    <link href="static/lib/animate/animate.min.css" rel="stylesheet">
+    <link href="static/lib/owlcarousel/assets/owl.carousel.min.css" rel="stylesheet">
+    <link href="static/lib/lightbox/css/lightbox.min.css" rel="stylesheet">
+    <link href="static/css/style.css" rel="stylesheet">
+    <link href="static/css/theme.css" rel="stylesheet">
+</head>
+
+<body>
+    <div class="navbar navbar-expand-lg navbar-dark" style="height: var(--navbar-h);">
+        <div class="container">
+            <a class="navbar-brand font-weight-bold text-white" href="{{ url_for('home') }}">
+                <i class="fas fa-vote-yea mr-2"></i>Smart Voting
+            </a>
+        </div>
+    </div>
+
+    <div class="hero">
+        <div class="container">
+            <div class="glass-card" style="max-width: 500px; margin: 0 auto;">
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                {% for category, message in messages %}
+                <div class="alert alert-{{ category }} mb-4">
+                    {{ message }}
+                </div>
+                {% endfor %}
+                {% endif %}
+                {% endwith %}
+
+                <h1 class="page-title">Verify Email</h1>
+                <p class="subtitle">Enter the OTP sent to your registered email.</p>
+
+                <form action="{{ url_for('verify') }}" method="post" class="mt-4">
+                    <div class="form-group">
+                        <label class="text-white">One Time Password (OTP)</label>
+                        <input type="text" name="otp_check" class="form-control text-center"
+                            placeholder="Enter 6-digit OTP" required style="font-size: 1.5rem; letter-spacing: 4px;" />
+                    </div>
+
+                    <div class="text-center mt-4">
+                        <button type="submit" class="btn btn-primary btn-block btn-lg">
+                            <i class="fas fa-check-circle mr-2"></i> Verify OTP
+                        </button>
+                    </div>
+                </form>
+
+                <div class="text-center mt-3">
+                    <form action="{{ url_for('verify') }}" method="get">
+                        <button type="submit" class="btn btn-link text-white-50">Resend OTP</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/js/bootstrap.bundle.min.js"></script>
+    <script src="static/js/main.js"></script>
+</body>
+
+</html>

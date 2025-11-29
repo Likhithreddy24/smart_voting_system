@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>Online Voting System - Admin Portal</title>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+
+    <link href="static/img/favicon.ico" rel="icon">
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700;800&display=swap"
+        rel="stylesheet">
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.10.0/css/all.min.css" rel="stylesheet">
+    <link href="static/lib/animate/animate.min.css" rel="stylesheet">
+    <link href="static/lib/owlcarousel/assets/owl.carousel.min.css" rel="stylesheet">
+    <link href="static/lib/lightbox/css/lightbox.min.css" rel="stylesheet">
+    <link href="static/css/style.css" rel="stylesheet">
+    <link href="static/css/theme.css" rel="stylesheet">
+</head>
+
+<body>
+    <div class="navbar navbar-expand-lg navbar-dark" style="height: var(--navbar-h);">
+        <div class="container">
+            <a class="navbar-brand font-weight-bold text-white" href="{{ url_for('home') }}">
+                <i class="fas fa-vote-yea mr-2"></i>Smart Voting
+            </a>
+            <button type="button" class="navbar-toggler" data-toggle="collapse" data-target="#navbarCollapse">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+
+            <div class="collapse navbar-collapse justify-content-end" id="navbarCollapse">
+                <div class="navbar-nav">
+                    <a href="{{ url_for('home') }}" class="nav-item nav-link">Home</a>
+                    <a href="{{ url_for('admin') }}" class="nav-item nav-link active">Admin</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="hero">
+        <div class="container">
+            <div class="glass-card" style="max-width: 1100px;">
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                {% for category, message in messages %}
+                <div class="alert alert-{{ category }} mb-4">
+                    {{ message }}
+                </div>
+                {% endfor %}
+                {% endif %}
+                {% endwith %}
+
+                {% if not admin %}
+                <!-- Admin Login Form -->
+                <div class="text-center" style="max-width: 400px; margin: 0 auto;">
+                    <h1 class="page-title">Admin Login</h1>
+                    <form action="{{ url_for('admin') }}" method="post" class="mt-4">
+                        <div class="form-group">
+                            <input type="email" name="email" class="form-control" placeholder="Admin Email" required />
+                        </div>
+                        <div class="form-group">
+                            <input type="password" name="password" class="form-control" placeholder="Password"
+                                required />
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-block mt-4">
+                            <i class="fas fa-lock mr-2"></i> Login
+                        </button>
+                    </form>
+                </div>
+                {% else %}
+                <!-- Admin Dashboard -->
+                <div class="text-center">
+                    <h1 class="page-title">Admin Dashboard</h1>
+                    <p class="subtitle">Manage the election process securely.</p>
+
+                    <div class="row justify-content-center mt-3">
+                        <div class="col-md-4 mb-2">
+                            <div class="p-2"
+                                style="background: rgba(255,255,255,0.05); border-radius: 12px; height: 100%;">
+                                <i class="fas fa-user-plus fa-2x text-white-50 mb-1"></i>
+                                <h5 class="text-white mb-1">Manage Nominees</h5>
+                                <a href="{{ url_for('add_nominee') }}" class="btn btn-primary btn-sm btn-block">Add
+                                    Nominee</a>
+                            </div>
+                        </div>
+                        <div class="col-md-4 mb-2">
+                            <div class="p-2"
+                                style="background: rgba(255,255,255,0.05); border-radius: 12px; height: 100%;">
+                                <i class="fas fa-poll fa-2x text-white-50 mb-1"></i>
+                                <h5 class="text-white mb-1">Election Results</h5>
+                                <a href="{{ url_for('voting_res') }}" class="btn btn-primary btn-sm btn-block">View
+                                    Results</a>
+                            </div>
+                        </div>
+                        <div class="col-md-4 mb-2">
+                            <div class="p-2"
+                                style="background: rgba(255,255,255,0.05); border-radius: 12px; height: 100%;">
+                                <i class="fas fa-brain fa-2x text-white-50 mb-1"></i>
+                                <h5 class="text-white mb-1">Model Training</h5>
+                                <a href="{{ url_for('train') }}" class="btn btn-primary btn-sm btn-block">Train
+                                    Model</a>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mt-3 p-3"
+                        style="background: rgba(255,255,255,0.4); border-radius: 20px; border: 1px solid rgba(0,0,128,0.1);">
+                        <h5 class="text-dark mb-3" style="font-weight: 700;">System & Data Logs</h5>
+                        <div class="row justify-content-center">
+                            <div class="col-md-3 mb-2">
+                                <div class="text-center p-2"
+                                    style="background: rgba(255,255,255,0.5); border-radius: 10px; border: 1px solid rgba(0,0,0,0.05);">
+                                    <i class="fas fa-list fa-lg text-primary mb-2"></i>
+                                    <h6 class="text-dark mb-2">Nominees</h6>
+                                    <a href="{{ url_for('debug_db_nominees') }}"
+                                        class="btn btn-outline-primary btn-sm btn-block font-weight-bold"
+                                        style="font-size: 0.75rem;">View List</a>
+                                </div>
+                            </div>
+                            <div class="col-md-3 mb-2">
+                                <div class="text-center p-2"
+                                    style="background: rgba(255,255,255,0.5); border-radius: 10px; border: 1px solid rgba(0,0,0,0.05);">
+                                    <i class="fas fa-history fa-lg text-primary mb-2"></i>
+                                    <h6 class="text-dark mb-2">Voting Logs</h6>
+                                    <a href="{{ url_for('debug_db_votes') }}"
+                                        class="btn btn-outline-primary btn-sm btn-block font-weight-bold"
+                                        style="font-size: 0.75rem;">View Logs</a>
+                                </div>
+                            </div>
+                            <div class="col-md-3 mb-2">
+                                <div class="text-center p-2"
+                                    style="background: rgba(255,255,255,0.5); border-radius: 10px; border: 1px solid rgba(0,0,0,0.05);">
+                                    <i class="fas fa-users fa-lg text-primary mb-2"></i>
+                                    <h6 class="text-dark mb-2">Voters</h6>
+                                    <a href="{{ url_for('debug_db_voters') }}"
+                                        class="btn btn-outline-primary btn-sm btn-block font-weight-bold"
+                                        style="font-size: 0.75rem;">View DB</a>
+                                </div>
+                            </div>
+                            <div class="col-md-3 mb-2">
+                                <div class="text-center p-2"
+                                    style="background: rgba(255,255,255,0.5); border-radius: 10px; border: 1px solid rgba(0,0,0,0.05);">
+                                    <i class="fas fa-chart-pie fa-lg text-primary mb-2"></i>
+                                    <h6 class="text-dark mb-2">Stats</h6>
+                                    <a href="{{ url_for('admin_stats') }}"
+                                        class="btn btn-outline-primary btn-sm btn-block font-weight-bold"
+                                        style="font-size: 0.75rem;">View Stats</a>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="mt-3 border-top pt-3 text-center">
+                            <a href="{{ url_for('login_details') }}" class="btn btn-primary btn-lg px-5 mr-3">
+                                <i class="fas fa-vote-yea mr-2"></i> Start Voting Mode
+                            </a>
+                            <a href="{{ url_for('logout') }}" class="btn btn-danger btn-lg px-5">
+                                <i class="fas fa-sign-out-alt mr-2"></i> Logout
+                            </a>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/js/bootstrap.bundle.min.js"></script>
+    <script src="static/js/main.js"></script>
+</body>
+
+</html>

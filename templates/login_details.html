@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>Online Voting System - Voter Login</title>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+
+    <link href="static/img/favicon.ico" rel="icon">
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700;800&display=swap"
+        rel="stylesheet">
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.10.0/css/all.min.css" rel="stylesheet">
+    <link href="static/lib/animate/animate.min.css" rel="stylesheet">
+    <link href="static/lib/owlcarousel/assets/owl.carousel.min.css" rel="stylesheet">
+    <link href="static/lib/lightbox/css/lightbox.min.css" rel="stylesheet">
+    <link href="static/css/style.css" rel="stylesheet">
+    <link href="static/css/theme.css" rel="stylesheet">
+
+    <style>
+        /* Styles moved to theme.css */
+    </style>
+</head>
+
+<body>
+    <div class="navbar navbar-expand-lg navbar-dark" style="height: var(--navbar-h);">
+        <div class="container">
+            <a class="navbar-brand font-weight-bold text-white" href="{{ url_for('home') }}">
+                <i class="fas fa-vote-yea mr-2"></i>Smart Voting
+            </a>
+            <div class="collapse navbar-collapse justify-content-end">
+                <div class="navbar-nav">
+                    <a href="{{ url_for('home') }}" class="nav-item nav-link">Home</a>
+                    <a href="{{ url_for('registration') }}" class="nav-item nav-link">Register</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="hero">
+        <div class="glass-card" style="max-width: 500px;">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+            {% for category, message in messages %}
+            <div class="alert alert-{{ category }} mb-4">
+                {{ message }}
+            </div>
+            {% endfor %}
+            {% endif %}
+            {% endwith %}
+
+            <h1 class="page-title">Voter Login</h1>
+
+            <form method="post">
+                <div class="form-group">
+                    <label>Voter ID</label>
+                    <input type="text" name="voter_id" class="form-control" placeholder="Enter Voter ID" required>
+                </div>
+                <div class="form-group">
+                    <label>Aadhar ID</label>
+                    <input type="text" name="aadhar_id" class="form-control" placeholder="Enter Aadhar Number" required>
+                </div>
+                <div class="form-group">
+                    <label>Email Address</label>
+                    <input type="email" name="email" class="form-control" placeholder="Enter Email" required>
+                </div>
+
+                <div class="mt-4">
+                    <button type="submit" class="btn btn-primary w-100">
+                        <i class="fas fa-sign-in-alt mr-2"></i> Proceed to Vote
+                    </button>
+                </div>
+            </form>
+
+            <div class="text-center mt-3">
+                <a href="{{ url_for('registration') }}" class="text-white-50" style="text-decoration: underline;">New
+                    Voter? Register Here</a>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/js/bootstrap.bundle.min.js"></script>
+</body>
+
+</html>

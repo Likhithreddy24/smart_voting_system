@@ -1,0 +1,326 @@
+:root {
+    /* India Tricolor Theme */
+    /* Saffron (Top), White (Middle), Green (Bottom) */
+    --gradient-1: linear-gradient(180deg, #FF9933 0%, #FFFFFF 45%, #FFFFFF 55%, #138808 100%);
+
+    /* Saffron-Orange - Action/CTA */
+    --gradient-cta: linear-gradient(135deg, #000080 0%, #000060 100%);
+    /* Chakra Blue for buttons */
+
+    /* Lighter Glass for White Background */
+    --glass-bg: rgba(255, 255, 255, 0.90);
+    --glass-border: rgba(0, 0, 128, 0.1);
+    /* Subtle Navy border */
+
+    /* Dark Text for Contrast */
+    --text-strong: #000080;
+    /* Navy Blue */
+    --text-soft: #333333;
+    --muted: #666666;
+
+    --shadow-1: 0 10px 30px rgba(0, 0, 0, 0.15);
+    --shadow-2: 0 18px 36px rgba(0, 0, 0, 0.20);
+
+    --btn-radius: 12px;
+    --navbar-h: 70px;
+}
+
+body {
+    min-height: 100vh;
+    background: var(--gradient-1);
+    background-attachment: fixed;
+    color: var(--text-soft);
+    font-family: 'Open Sans', system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Navbar Overrides */
+.navbar {
+    background: linear-gradient(90deg, #FF9933 0%, #FFFFFF 50%, #138808 100%) !important;
+    backdrop-filter: blur(6px);
+    box-shadow: var(--shadow-1);
+}
+
+.navbar .nav-link {
+    color: #000080 !important;
+    /* Navy Blue */
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    text-shadow: 0 1px 2px rgba(255, 255, 255, 0.8);
+}
+
+.navbar .nav-link.active {
+    color: #000000 !important;
+    text-decoration: none !important;
+    /* Removed underline */
+    background: transparent !important;
+    /* Removed background box */
+}
+
+.navbar .nav-link:hover {
+    color: #000000 !important;
+    text-decoration: none !important;
+    background: transparent !important;
+}
+
+.navbar-brand {
+    color: #000080 !important;
+    text-shadow: 0 1px 2px rgba(255, 255, 255, 0.8);
+}
+
+/* Hero Section */
+.hero {
+    min-height: calc(100vh - var(--navbar-h));
+    display: flex;
+    /* Use margin: auto on child for safe centering */
+    padding: 80px 12px 150px 12px;
+    /* Added extra bottom padding to ensure bottom content is visible */
+    /* Reset any old background images */
+    background-image: none !important;
+}
+
+/* Glass Card Container */
+.glass-card {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 30px;
+    /* Increased radius */
+    padding: 32px 28px;
+    box-shadow: var(--shadow-2);
+    backdrop-filter: blur(10px);
+    max-width: 850px;
+    /* Reduced width for compact look */
+    margin: auto;
+    /* Safe vertical/horizontal centering */
+    width: 100%;
+}
+
+/* Theme Overrides for Light Background */
+.glass-card .text-white,
+.glass-card .text-white-50,
+.glass-card h1,
+.glass-card h2,
+.glass-card h3,
+.glass-card h4,
+.glass-card h5,
+.glass-card h6,
+.glass-card p,
+.glass-card label,
+.glass-card span,
+.glass-card div {
+    color: var(--text-strong) !important;
+}
+
+.glass-card .text-white-50 {
+    color: var(--muted) !important;
+    opacity: 0.8;
+}
+
+.glass-card .alert {
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    color: #333 !important;
+}
+
+/* Fix for Candidate Cards in Select Candidate Page */
+.candidate-card .candidate-name {
+    color: var(--text-strong) !important;
+}
+
+.candidate-card .party-name {
+    color: var(--muted) !important;
+}
+
+.candidate-card {
+    background: rgba(0, 0, 128, 0.05) !important;
+    border: 1px solid rgba(0, 0, 128, 0.1) !important;
+}
+
+.candidate-card:hover {
+    background: rgba(0, 0, 128, 0.1) !important;
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Candidate Card Image */
+.candidate-img {
+    width: 120px;
+    height: 120px;
+    object-fit: contain;
+    margin-bottom: 15px;
+    border-radius: 50%;
+    /* Optional: make it circular */
+    background: white;
+    /* Ensure background is white if image is transparent */
+    padding: 10px;
+}
+
+/* Typography */
+.page-title {
+    color: var(--text-strong);
+    font-weight: 800;
+    letter-spacing: 0.4px;
+    text-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+    font-size: 2.1rem;
+    margin-bottom: 1rem;
+    text-align: center;
+}
+
+.subtitle {
+    color: var(--muted);
+    font-size: 1.05rem;
+    margin-bottom: 1.25rem;
+    text-align: center;
+}
+
+/* Buttons */
+.btn-primary {
+    background-image: var(--gradient-cta);
+    border: none;
+    border-radius: var(--btn-radius);
+    font-weight: 800;
+    letter-spacing: 0.3px;
+    padding: 12px 20px;
+    box-shadow: 0 10px 18px rgba(0, 0, 0, 0.20);
+    transition: transform .15s ease, box-shadow .2s ease, opacity .2s ease;
+    color: #fff;
+}
+
+.btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 16px 26px rgba(0, 0, 0, 0.26);
+    opacity: 0.97;
+    color: #fff;
+    text-decoration: none;
+}
+
+/* Utilities */
+.divider {
+    border-top: 1px solid rgba(255, 255, 255, 0.2);
+    margin: 18px 0 24px;
+}
+
+.alert {
+    border-radius: 10px;
+    border: none;
+    box-shadow: var(--shadow-1);
+}
+
+/* Form Controls Global Override */
+.form-control {
+    background: rgba(255, 255, 255, 0.8) !important;
+    border: 1px solid rgba(0, 0, 128, 0.2) !important;
+    color: var(--text-strong) !important;
+    border-radius: 12px;
+    height: 50px;
+}
+
+.form-control:focus {
+    background: #ffffff !important;
+    color: var(--text-strong) !important;
+    box-shadow: 0 0 0 0.2rem rgba(0, 0, 128, 0.15) !important;
+    border-color: var(--text-strong) !important;
+}
+
+.form-control::placeholder {
+    color: #666 !important;
+    opacity: 0.7;
+}
+
+select.form-control option {
+    color: #333;
+    background: #fff;
+}
+
+/* Back to Top */
+.back-to-top {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 50%;
+    width: 46px;
+    height: 46px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    box-shadow: var(--shadow-1);
+}
+
+.back-to-top:hover {
+    background: rgba(255, 255, 255, 0.3);
+    color: #fff;
+}
+
+/* Election Results Table */
+.table-glass {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-strong);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.table-glass th,
+.table-glass td {
+    border-color: rgba(0, 0, 128, 0.1);
+    vertical-align: middle;
+}
+
+.table-glass thead th {
+    border-bottom: 2px solid rgba(0, 0, 128, 0.2);
+    background: rgba(0, 0, 128, 0.05);
+    color: var(--text-strong);
+}
+
+.nominee-img {
+    width: 60px;
+    height: 60px;
+    object-fit: cover;
+    border-radius: 50%;
+    border: 2px solid rgba(0, 0, 128, 0.2);
+}
+
+/* Home Page Steps */
+.steps {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 16px;
+}
+
+@media (max-width: 992px) {
+    .steps {
+        grid-template-columns: 1fr;
+    }
+}
+
+.step {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(0, 0, 128, 0.1);
+    border-radius: 14px;
+    padding: 16px;
+    height: 100%;
+}
+
+.step h5 {
+    color: var(--text-strong);
+    font-weight: 700;
+    margin-bottom: 6px;
+    font-size: 1.05rem;
+}
+
+.step p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.98rem;
+    line-height: 1.45rem;
+}
+
+.actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    justify-content: center;
+    margin-top: 18px;
+}
+
+.helper {
+    margin-top: 16px;
+    color: var(--muted);
+    font-size: 0.95rem;
+}

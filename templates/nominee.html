@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>Online Voting System - Add Nominee</title>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+
+    <link href="static/img/favicon.ico" rel="icon">
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700;800&display=swap"
+        rel="stylesheet">
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.10.0/css/all.min.css" rel="stylesheet">
+    <link href="static/lib/animate/animate.min.css" rel="stylesheet">
+    <link href="static/lib/owlcarousel/assets/owl.carousel.min.css" rel="stylesheet">
+    <link href="static/lib/lightbox/css/lightbox.min.css" rel="stylesheet">
+    <link href="static/css/style.css" rel="stylesheet">
+    <link href="static/css/theme.css" rel="stylesheet">
+</head>
+
+<body>
+    <div class="navbar navbar-expand-lg navbar-dark" style="height: var(--navbar-h);">
+        <div class="container">
+            <a class="navbar-brand font-weight-bold text-white" href="{{ url_for('home') }}">
+                <i class="fas fa-vote-yea mr-2"></i>Smart Voting
+            </a>
+            <button type="button" class="navbar-toggler" data-toggle="collapse" data-target="#navbarCollapse">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+
+            <div class="collapse navbar-collapse justify-content-end" id="navbarCollapse">
+                <div class="navbar-nav">
+                    <a href="{{ url_for('home') }}" class="nav-item nav-link">Home</a>
+                    <a href="{{ url_for('admin') }}" class="nav-item nav-link active">Admin</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="hero">
+        <div class="container">
+            <div class="glass-card" style="max-width: 600px; margin: 0 auto;">
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                {% for category, message in messages %}
+                <div class="alert alert-{{ category }} mb-4">
+                    {{ message }}
+                </div>
+                {% endfor %}
+                {% endif %}
+                {% endwith %}
+
+                <h1 class="page-title">Add Nominee</h1>
+                <p class="subtitle">Register a new candidate for the election.</p>
+
+                <form action="{{ url_for('add_nominee') }}" method="post" enctype="multipart/form-data" class="mt-4">
+                    <div class="form-group">
+                        <label class="text-white">Nominee Name</label>
+                        <input type="text" name="name" class="form-control" placeholder="Full Name" required />
+                    </div>
+                    <div class="form-group">
+                        <label class="text-white">Party Name</label>
+                        <input type="text" name="party" class="form-control" placeholder="Political Party" required />
+                    </div>
+                    <div class="form-group">
+                        <label class="text-white">Party Logo / Symbol</label>
+                        <select class="form-control mb-3" name="predefined_symbol" id="symbolSelect">
+                            <option value="">-- Select Common Symbol (Optional) --</option>
+                            <option value="bjp.png">BJP (Lotus)</option>
+                            <option value="congress.png">Congress (Hand)</option>
+                            <option value="brs.png">BRS (Car)</option>
+                            <option value="aimim.png">AIMIM (Kite)</option>
+                            <option value="tdp.png">TDP (Cycle)</option>
+                            <option value="custom">Upload Custom Symbol</option>
+                        </select>
+
+                        <div class="custom-file" id="customFileDiv" style="display: none;">
+                            <input type="file" name="image" class="custom-file-input" id="customFile">
+                            <label class="custom-file-label" for="customFile">Choose file</label>
+                        </div>
+                    </div>
+
+                    <div class="text-center mt-4">
+                        <button type="submit" class="btn btn-primary btn-block">
+                            <i class="fas fa-plus-circle mr-2"></i> Add Nominee
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/js/bootstrap.bundle.min.js"></script>
+    <script src="static/js/main.js"></script>
+    <script>
+        // Custom file input label update
+        $(".custom-file-input").on("change", function () {
+            var fileName = $(this).val().split("\\").pop();
+            $(this).siblings(".custom-file-label").addClass("selected").html(fileName);
+        });
+
+        // Handle Symbol Selection
+        $('#symbolSelect').change(function () {
+            var val = $(this).val();
+            if (val === 'custom') {
+                $('#customFileDiv').show();
+                $('#customFile').prop('required', true);
+            } else {
+                $('#customFileDiv').hide();
+                $('#customFile').prop('required', false);
+            }
+        });
+        // Trigger change on load to set initial state
+        $('#symbolSelect').trigger('change');
+    </script>
+</body>
+
+</html>
