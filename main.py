@@ -872,16 +872,16 @@ def capture_images():
             if best_face:
                 x, y, w, h = best_face
                 
-                # Validation Checks
-                if w < config.MIN_FACE_SIZE or h < config.MIN_FACE_SIZE:
-                    return {"status": "ignored", "reason": "too_small"}
+                # Validation Checks (DISABLED for speed)
+                # if w < config.MIN_FACE_SIZE or h < config.MIN_FACE_SIZE:
+                #     return {"status": "ignored", "reason": "too_small"}
                 
                 roi = gray[y:y + h, x:x + w]
-                if is_blurry(roi):
-                    return {"status": "ignored", "reason": "blurry"}
+                # if is_blurry(roi):
+                #     return {"status": "ignored", "reason": "blurry"}
                 
-                if not face_centered_and_large(frame_w, frame_h, x, y, w, h):
-                    return {"status": "ignored", "reason": "not_centered"}
+                # if not face_centered_and_large(frame_w, frame_h, x, y, w, h):
+                #     return {"status": "ignored", "reason": "not_centered"}
 
                 # Save Image
                 sampleNum = current_count + 1
