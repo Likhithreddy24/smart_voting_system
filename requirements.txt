@@ -14,3 +14,4 @@ imutils
 PyMySQL==1.1.1
 pandas
 certifi
+requests
