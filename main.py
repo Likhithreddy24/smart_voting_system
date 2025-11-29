@@ -281,58 +281,75 @@ def valid_phone(pno: str) -> bool:
     return 8 <= len(digits) <= 15
 
 def send_otp_email(to_address: str, otp_code: str) -> bool:
-    import threading
+    import os, threading, logging, time, requests
+
+    logger = logging.getLogger(__name__)
+
     def _worker():
         try:
-            import smtplib, ssl
-            from email.mime.text import MIMEText
-            
-            import certifi
-            
-            # Use Config or Env vars
-            host = os.environ.get("MAIL_HOST", "smtp.gmail.com")
-            # Default to 465 (SSL) which is often more reliable in cloud environments
-            port = int(os.environ.get("MAIL_PORT", "465"))
-            username = config.MAIL_USER or os.environ.get("MAIL_USERNAME")
-            password = config.MAIL_PASS or os.environ.get("MAIL_PASSWORD")
-            mail_from = os.environ.get("MAIL_FROM", username)
-            
-            if not (username and password):
-                logger.warning("MAIL_USER / MAIL_PASS not set; skipping email send")
-                return
+            # Try importing your config module if available
+            try:
+                import config
+            except Exception:
+                config = None
 
-            logger.info(f"Attempting to connect to SMTP server: {host}:{port} (SSL={'Yes' if port==465 else 'No'})")
+            # Sender address
+            mail_from = os.environ.get("MAIL_FROM")
+            if not mail_from:
+                mail_from = (
+                    (getattr(config, "MAIL_USER", None) if config else None)
+                    or os.environ.get("MAIL_USERNAME")
+                    or "noreply@example.com"
+                )
 
-
-            msg = MIMEMultipart()
-            msg["Subject"] = "Your OTP Code for Smart Voting"
-            msg["From"] = mail_from
-            msg["To"] = to_address
-            
-            body = f"Your OTP is: {otp_code}\nThis code will expire in {config.OTP_EXPIRY_SECONDS // 60} minutes."
-            msg.attach(MIMEText(body, 'plain'))
-            
-            # Use certifi to get the path to the CA bundle
-            context = ssl.create_default_context(cafile=certifi.where())
-            
-            if port == 465:
-                # Use SMTP_SSL for port 465
-                with smtplib.SMTP_SSL(host, port, context=context, timeout=20) as smtp:
-                    smtp.login(username, password)
-                    smtp.send_message(msg)
+            # OTP expiry (from config or environment)
+            if config and hasattr(config, "OTP_EXPIRY_SECONDS"):
+                expiry_minutes = int(getattr(config, "OTP_EXPIRY_SECONDS")) // 60
             else:
-                # Use STARTTLS for other ports (e.g. 587)
-                with smtplib.SMTP(host, port, timeout=20) as smtp:
-                    smtp.ehlo()
-                    try:
-                        smtp.starttls(context=context)
-                        smtp.ehlo()
-                    except Exception as e:
-                        logger.warning("STARTTLS failed (continuing): %s", e)
-                    smtp.login(username, password)
-                    smtp.send_message(msg)
-                    
-            logger.info("✅ OTP email dispatched to %s", to_address)
+                expiry_minutes = int(os.environ.get("OTP_EXPIRY_SECONDS", "300")) // 60
+
+            # Resend API key
+            api_key = os.environ.get("RESEND_API_KEY")
+            if not api_key:
+                raise RuntimeError("RESEND_API_KEY not set in environment")
+
+            # Build email payload
+            payload = {
+                "from": mail_from,
+                "to": [to_address],
+                "subject": "Your OTP Code for Smart Voting",
+                "html": (
+                    f"<p>Your OTP is <b>{otp_code}</b>.</p>"
+                    f"<p>This code will expire in {expiry_minutes} minutes.</p>"
+                ),
+            }
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+
+            # Try sending with up to 3 retries
+            for attempt in range(3):
+                try:
+                    resp = requests.post(
+                        "https://api.resend.com/emails",
+                        json=payload,
+                        headers=headers,
+                        timeout=15,
+                    )
+                    if 200 <= resp.status_code < 300:
+                        logger.info("✅ OTP email dispatched to %s via Resend", to_address)
+                        return
+                    else:
+                        logger.error(
+                            "Resend error (HTTP %s): %s", resp.status_code, resp.text
+                        )
+                except Exception as e:
+                    logger.error("Resend request failed (attempt %d): %r", attempt + 1, e)
+                time.sleep(1.5 * (attempt + 1))
+
+            raise RuntimeError("Email send failed after 3 retries via Resend")
+
         except Exception as e:
             logger.error("❌ OTP email failed: %s", repr(e))
 
