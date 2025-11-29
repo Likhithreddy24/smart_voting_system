@@ -40,36 +40,45 @@
     <div class="hero">
         <div class="container">
             <div class="glass-card text-center">
-                {% with messages = get_flashed_messages(with_categories=true) %}
-                {% if messages %}
-                {% for category, message in messages %}
-                <div class="alert alert-{{ category }} mb-4">
-                    {{ message }}
-                </div>
-                {% endfor %}
-                {% endif %}
-                {% endwith %}
-
                 <h1 class="page-title">Capture Face Data</h1>
                 <p class="subtitle">We need to capture your face to train the secure voting model.</p>
 
-                <div class="row justify-content-center mt-5">
+                <div class="row justify-content-center mt-4">
                     <div class="col-md-8">
-                        <div class="mb-4">
+                        <div id="camera-container" class="mb-4 position-relative" style="display: none;">
+                            <video id="video" width="640" height="480" autoplay playsinline style="width: 100%; max-width: 600px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.2);"></video>
+                            <canvas id="canvas" width="640" height="480" style="display: none;"></canvas>
+                            <div id="overlay" style="position: absolute; top: 10px; left: 10px; color: white; background: rgba(0,0,0,0.5); padding: 5px 10px; border-radius: 5px;">
+                                Ready
+                            </div>
+                        </div>
+
+                        <div id="instructions" class="mb-4">
                             <i class="fas fa-camera-retro fa-4x text-white-50 mb-3"></i>
                             <p class="lead text-white">
                                 <b>Instructions:</b><br>
                                 1. Ensure good lighting.<br>
                                 2. Look straight at the camera.<br>
-                                3. The system will automatically capture multiple images.
+                                3. Click "Start Camera" to begin.
                             </p>
                         </div>
 
-                        <form action="{{ url_for('capture_images') }}" method="post">
-                            <button type="submit" class="btn btn-primary btn-lg px-5">
-                                <i class="fas fa-camera mr-2"></i> Start Capture
+                        <div id="controls">
+                            <button id="start-btn" class="btn btn-primary btn-lg px-5">
+                                <i class="fas fa-camera mr-2"></i> Start Camera
                             </button>
-                        </form>
+                            <button id="capture-btn" class="btn btn-success btn-lg px-5" style="display: none;">
+                                <i class="fas fa-play-circle mr-2"></i> Start Capture
+                            </button>
+                        </div>
+                        
+                        <div id="progress-container" class="mt-4" style="display: none;">
+                            <p class="text-white mb-2">Capturing images... <span id="count">0</span>/100</p>
+                            <div class="progress" style="height: 20px;">
+                                <div id="progress-bar" class="progress-bar bg-success" role="progressbar" style="width: 0%"></div>
+                            </div>
+                            <p id="status-msg" class="text-white-50 mt-2 small"></p>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -78,7 +87,101 @@
 
     <script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
     <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/js/bootstrap.bundle.min.js"></script>
-    <script src="static/js/main.js"></script>
+    
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const startBtn = document.getElementById('start-btn');
+        const captureBtn = document.getElementById('capture-btn');
+        const cameraContainer = document.getElementById('camera-container');
+        const instructions = document.getElementById('instructions');
+        const progressContainer = document.getElementById('progress-container');
+        const progressBar = document.getElementById('progress-bar');
+        const countSpan = document.getElementById('count');
+        const statusMsg = document.getElementById('status-msg');
+        const overlay = document.getElementById('overlay');
+
+        let stream = null;
+        let capturing = false;
+        let capturedCount = 0;
+        const TARGET_COUNT = 100;
+
+        startBtn.addEventListener('click', async () => {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+                cameraContainer.style.display = 'block';
+                instructions.style.display = 'none';
+                startBtn.style.display = 'none';
+                captureBtn.style.display = 'inline-block';
+            } catch (err) {
+                alert("Error accessing camera: " + err.message);
+            }
+        });
+
+        captureBtn.addEventListener('click', () => {
+            capturing = true;
+            captureBtn.style.display = 'none';
+            progressContainer.style.display = 'block';
+            captureLoop();
+        });
+
+        async function captureLoop() {
+            if (!capturing || capturedCount >= TARGET_COUNT) {
+                if (capturedCount >= TARGET_COUNT) {
+                    finishCapture();
+                }
+                return;
+            }
+
+            const context = canvas.getContext('2d');
+            context.drawImage(video, 0, 0, 640, 480);
+            const dataURL = canvas.toDataURL('image/jpeg', 0.8);
+
+            try {
+                const response = await fetch('{{ url_for("capture_images") }}', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ image: dataURL })
+                });
+
+                const result = await response.json();
+
+                if (result.status === 'success') {
+                    capturedCount++;
+                    const percent = (capturedCount / TARGET_COUNT) * 100;
+                    progressBar.style.width = percent + '%';
+                    countSpan.innerText = capturedCount;
+                    statusMsg.innerText = "Processing...";
+                    overlay.innerText = `Captured: ${capturedCount}`;
+                } else if (result.status === 'finished') {
+                    finishCapture();
+                    return;
+                } else {
+                    statusMsg.innerText = "Ignored: " + (result.reason || "Unknown");
+                }
+            } catch (e) {
+                console.error("Upload failed", e);
+                statusMsg.innerText = "Network error, retrying...";
+            }
+
+            // Capture next frame with a slight delay
+            setTimeout(captureLoop, 100); 
+        }
+
+        function finishCapture() {
+            capturing = false;
+            statusMsg.innerText = "Capture Complete! Redirecting...";
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+            setTimeout(() => {
+                window.location.href = "{{ url_for('home') }}";
+            }, 1000);
+        }
+    </script>
 </body>
 
 </html>
